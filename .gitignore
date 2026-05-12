@@ -1,0 +1,11 @@
+.env
+.cache
+src/.spotify_caches/
+static/uploads/
+src/static/uploads/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
