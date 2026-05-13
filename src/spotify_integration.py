@@ -9,10 +9,10 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def create_spotify_oauth(user_email):
+def create_spotify_oauth(user_email, redirect_uri=None):
     client_id = os.getenv("SPOTIFY_CLIENT_ID")
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
-    redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI")
+    redirect_uri = redirect_uri or os.getenv("SPOTIFY_REDIRECT_URI")
 
     if not client_id or not client_secret or not redirect_uri:
         raise RuntimeError(

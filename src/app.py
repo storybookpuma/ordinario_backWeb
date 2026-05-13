@@ -29,6 +29,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def get_spotify_redirect_uri():
+    proto = request.headers.get("X-Forwarded-Proto", request.scheme).split(",")[0].strip()
+    host = request.headers.get("X-Forwarded-Host", request.host).split(",")[0].strip()
+    return f"{proto}://{host}/callback"
+
+
 # Leer la clave de API desde las variables de entorno
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 
@@ -187,7 +193,7 @@ def auth_spotify():
     if not user_email:
         return jsonify({"error": "State parameter missing"}), 400
     try:
-        sp_oauth = create_spotify_oauth(user_email)
+        sp_oauth = create_spotify_oauth(user_email, get_spotify_redirect_uri())
         auth_url = sp_oauth.get_authorize_url(state=user_email)
         return redirect(auth_url)
     except RuntimeError as e:
@@ -206,7 +212,7 @@ def spotify_callback():
         user_email = state  # Obtenemos el email del usuario desde 'state'
 
         # Obtener el token de acceso de Spotify
-        sp_oauth = create_spotify_oauth(user_email)
+        sp_oauth = create_spotify_oauth(user_email, get_spotify_redirect_uri())
         token_info = sp_oauth.get_access_token(code, as_dict=True)
 
         # Actualizar los datos del usuario con los tokens de Spotify
