@@ -5,6 +5,9 @@ from datetime import datetime, timezone, timedelta
 from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required
 from marshmallow import Schema, fields, ValidationError
 from dotenv import load_dotenv
+from urllib.parse import urlencode
+import base64
+import json
 
 load_dotenv()
 
@@ -33,6 +36,34 @@ def get_spotify_redirect_uri():
     proto = request.headers.get("X-Forwarded-Proto", request.scheme).split(",")[0].strip()
     host = request.headers.get("X-Forwarded-Host", request.host).split(",")[0].strip()
     return f"{proto}://{host}/callback"
+
+
+def encode_spotify_state(email, return_url=None):
+    payload = {"email": email, "return_url": return_url}
+    encoded = base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("utf-8")
+    return encoded.rstrip("=")
+
+
+def decode_spotify_state(state):
+    try:
+        padded_state = state + "=" * (-len(state) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded_state.encode("utf-8")))
+        return payload.get("email"), payload.get("return_url")
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return state, None
+
+
+def is_allowed_frontend_return_url(return_url):
+    if not return_url:
+        return False
+
+    return return_url.startswith(("frontsb://", "exp://", "exps://"))
+
+
+def build_frontend_redirect_url(return_url, token):
+    base_url = return_url if is_allowed_frontend_return_url(return_url) else app.config["FRONTEND_DEEP_LINK"]
+    separator = "&" if "?" in base_url else "?"
+    return f"{base_url}{separator}{urlencode({'token': token})}"
 
 
 # Leer la clave de API desde las variables de entorno
@@ -190,11 +221,12 @@ def login():
 @app.route('/auth/spotify')
 def auth_spotify():
     user_email = request.args.get('state')
+    return_url = request.args.get('return_url')
     if not user_email:
         return jsonify({"error": "State parameter missing"}), 400
     try:
         sp_oauth = create_spotify_oauth(user_email, get_spotify_redirect_uri())
-        auth_url = sp_oauth.get_authorize_url(state=user_email)
+        auth_url = sp_oauth.get_authorize_url(state=encode_spotify_state(user_email, return_url))
         return redirect(auth_url)
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 503
@@ -203,13 +235,13 @@ def auth_spotify():
 @app.route('/callback')
 def spotify_callback():
     code = request.args.get('code')
-    state = request.args.get('state')  # Esto es el email del usuario pasado como 'state'
+    state = request.args.get('state')
 
     if not code or not state:
         return jsonify({"error": "Faltan los parámetros 'code' o 'state'."}), 400
 
     try:
-        user_email = state  # Obtenemos el email del usuario desde 'state'
+        user_email, return_url = decode_spotify_state(state)
 
         # Obtener el token de acceso de Spotify
         sp_oauth = create_spotify_oauth(user_email, get_spotify_redirect_uri())
@@ -229,7 +261,7 @@ def spotify_callback():
         new_jwt = create_access_token(identity=user_email)
 
         # Redirigir al frontend utilizando un deep link
-        redirect_url = f'{app.config["FRONTEND_DEEP_LINK"]}?token={new_jwt}'
+        redirect_url = build_frontend_redirect_url(return_url, new_jwt)
         return redirect(redirect_url)
 
     except Exception as e:
