@@ -2,10 +2,8 @@ from datetime import datetime, timezone
 from flask import Blueprint, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from marshmallow import ValidationError
-import spotipy
 import logging
 
-from ..spotify_integration import get_valid_spotify_token, verify_entity_exists
 from ..utils.api import (
     get_json_body,
     get_string_field,
@@ -23,22 +21,6 @@ bp = Blueprint("comments", __name__, url_prefix="/<entity_type>/<entity_id>")
 
 def _get_repos():
     return current_app.extensions["repositories"]
-
-
-def _resolve_entity(entity_type, entity_id, current_user_email):
-    repos = _get_repos()
-    if entity_type == "profile":
-        entity_obj_id = repos.users.get_profile_entity_id(entity_id)
-        if not entity_obj_id:
-            return None
-        return entity_obj_id
-    access_token = get_valid_spotify_token(current_user_email, repos.users)
-    if not access_token:
-        raise PermissionError("spotify_auth_required")
-    sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
-    if not verify_entity_exists(entity_type, entity_id, sp):
-        return None
-    return entity_id
 
 
 def _resolve_entity_read(entity_type, entity_id):
@@ -71,10 +53,7 @@ def add_comment(entity_type, entity_id):
         data = get_json_body()
         comment_text = get_string_field(data, "comment_text", max_length=500)
 
-        try:
-            entity_obj_id = _resolve_entity(entity_type, entity_id, current_user_email)
-        except PermissionError:
-            return jsonify({"message": "Por favor, inicia sesión en Spotify."}), 401
+        entity_obj_id = _resolve_entity_read(entity_type, entity_id)
         if entity_obj_id is None:
             return jsonify({"message": "ID de entidad inválido."}), 400
 
@@ -118,10 +97,7 @@ def delete_comment(entity_type, entity_id, comment_id):
 
         user_id = str(user["_id"])
 
-        try:
-            entity_obj_id = _resolve_entity(entity_type, entity_id, current_user_email)
-        except PermissionError:
-            return jsonify({"message": "Por favor, inicia sesión en Spotify."}), 401
+        entity_obj_id = _resolve_entity_read(entity_type, entity_id)
         if entity_obj_id is None:
             return jsonify({"message": "ID de entidad inválido."}), 400
 
@@ -201,10 +177,7 @@ def like_comment(entity_type, entity_id, comment_id):
 
         validate_entity_type(entity_type)
 
-        try:
-            entity_obj_id = _resolve_entity(entity_type, entity_id, current_user_email)
-        except PermissionError:
-            return jsonify({"message": "Por favor, inicia sesión en Spotify."}), 401
+        entity_obj_id = _resolve_entity_read(entity_type, entity_id)
         if entity_obj_id is None:
             return jsonify({"message": "ID de entidad inválido."}), 400
 
@@ -256,10 +229,7 @@ def dislike_comment(entity_type, entity_id, comment_id):
 
         validate_entity_type(entity_type)
 
-        try:
-            entity_obj_id = _resolve_entity(entity_type, entity_id, current_user_email)
-        except PermissionError:
-            return jsonify({"message": "Por favor, inicia sesión en Spotify."}), 401
+        entity_obj_id = _resolve_entity_read(entity_type, entity_id)
         if entity_obj_id is None:
             return jsonify({"message": "ID de entidad inválido."}), 400
 

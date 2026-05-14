@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, current_app
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from marshmallow import ValidationError
 import logging
@@ -10,8 +10,17 @@ bp = Blueprint("ratings", __name__)
 
 
 def _get_repos():
-    from flask import current_app
     return current_app.extensions["repositories"]
+
+
+def _invalidate_rating_cache(entity_type, entity_id):
+    cache = current_app.extensions.get("cache")
+    if cache:
+        cache.delete(f"details:{entity_type}:{entity_id}")
+        cache.delete(f"charts:top_rated:{entity_type}:20")
+        cache.delete(f"charts:top_rated:{entity_type}:50")
+        cache.delete(f"activity:global:20")
+        cache.delete(f"activity:global:50")
 
 
 def _validate_rating_payload(data):
@@ -53,6 +62,7 @@ def rate_entity():
 
         repos.ratings.create(entity_type, entity_id, user_id, rating)
         summary = repos.ratings.summarize_entity(entity_type, entity_id)
+        _invalidate_rating_cache(entity_type, entity_id)
         logger.info(f"Entidad {entity_id} averageRating={summary['averageRating']}, ratingCount={summary['ratingCount']}")
         return jsonify({
             "message": "Calificación añadida correctamente.",
@@ -88,6 +98,7 @@ def update_rate_entity():
 
         repos.ratings.update_rating(entity_type, entity_id, user_id, rating)
         summary = repos.ratings.summarize_entity(entity_type, entity_id)
+        _invalidate_rating_cache(entity_type, entity_id)
         return jsonify({
             "message": "Calificación actualizada correctamente.",
             "averageRating": summary["averageRating"],
@@ -126,6 +137,7 @@ def delete_rate_entity():
 
         repos.ratings.delete_rating(entity_type, entity_id, user_id)
         summary = repos.ratings.summarize_entity(entity_type, entity_id)
+        _invalidate_rating_cache(entity_type, entity_id)
         return jsonify({
             "message": "Calificación eliminada correctamente.",
             "averageRating": summary["averageRating"],

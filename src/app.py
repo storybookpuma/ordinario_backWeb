@@ -1049,12 +1049,54 @@ def top_rated_charts():
 
     try:
         top_items = ratings_repository.top_rated(entity_type, limit)
+        entity_ids = [item["_id"] for item in top_items]
+
+        # Enriquecer con metadata de Spotify si hay token disponible
+        metadata = {}
+        current_user = get_jwt_identity()
+        access_token = get_valid_spotify_token(current_user, users_repository)
+        if access_token and entity_ids:
+            try:
+                sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
+                if entity_type == 'song':
+                    tracks = sp.tracks(entity_ids).get('tracks', [])
+                    for track in tracks:
+                        if track:
+                            metadata[track['id']] = {
+                                'name': track['name'],
+                                'image': track['album']['images'][0]['url'] if track['album']['images'] else None,
+                                'artist': ', '.join(a['name'] for a in track['artists']),
+                            }
+                elif entity_type == 'album':
+                    albums = sp.albums(entity_ids).get('albums', [])
+                    for album in albums:
+                        if album:
+                            metadata[album['id']] = {
+                                'name': album['name'],
+                                'image': album['images'][0]['url'] if album['images'] else None,
+                                'artist': ', '.join(a['name'] for a in album['artists']),
+                            }
+                elif entity_type == 'artist':
+                    artists = sp.artists(entity_ids).get('artists', [])
+                    for artist in artists:
+                        if artist:
+                            metadata[artist['id']] = {
+                                'name': artist['name'],
+                                'image': artist['images'][0]['url'] if artist['images'] else None,
+                            }
+            except Exception:
+                logger.exception("Error al enriquecer charts con Spotify")
+
         results = []
         for item in top_items:
+            meta = metadata.get(item["_id"], {})
             results.append({
                 "entityId": item["_id"],
                 "averageRating": round(item["averageRating"], 2) if item["averageRating"] else 0,
                 "ratingCount": item["ratingCount"],
+                "name": meta.get("name") or item["_id"],
+                "image": meta.get("image"),
+                "artist": meta.get("artist"),
             })
 
         app.extensions["cache"].set(cache_key, results, ttl=600)
