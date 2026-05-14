@@ -30,6 +30,8 @@ def create_repositories(app, mongo):
 
     if provider == "supabase":
         client = create_supabase_client(app)
+        app.extensions = getattr(app, "extensions", {})
+        app.extensions["supabase"] = client
         return Repositories(
             users=SupabaseUsersRepository(client),
             comments=SupabaseCommentsRepository(client),

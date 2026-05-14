@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, redirect, g, send_from_directory
+from flask import Flask, request, jsonify, redirect, g
 from flask_pymongo import PyMongo
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timezone, timedelta
@@ -123,17 +123,9 @@ def handle_unexpected_error(error):
     logger.exception("Unhandled server error", exc_info=error)
     return internal_error()
 
-UPLOAD_FOLDER = app.config['UPLOAD_FOLDER']
-app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-
-
 if app.config["CREATE_DB_INDEXES"]:
     ratings_repository.ensure_indexes()
 
-
-# Crear la carpeta si no existe
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
 
 # Extensiones permitidas
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
@@ -142,11 +134,6 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-
-@app.route('/uploads/<path:filename>', methods=['GET'])
-def uploaded_profile_picture(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 
 def resolve_profile_entity_id(entity_id):
@@ -214,7 +201,7 @@ def register():
         'username': username,
         'email': email,
         'password': hashed_password,
-        'profile_picture': '/static/uploads/profile_pictures/default_picture.png',
+        'profile_picture': None,
         'favorites': []
     }
     created_user = users_repository.create(user)
@@ -313,6 +300,16 @@ def spotify_callback():
         return jsonify({"error": f"Error en el callback de Spotify: {str(e)}"}), 400
 
 
+CONTENT_TYPE_MAP = {
+    'png': 'image/png',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'gif': 'image/gif',
+}
+
+BUCKET_PROFILE_PICTURES = "profile-pictures"
+
+
 @app.route('/update_profile_picture', methods=['POST'])
 @jwt_required()
 @rate_limit(20)
@@ -323,22 +320,34 @@ def update_profile_picture():
     if file.filename == '':
         return jsonify({'message': 'No se seleccionó ningún archivo'}), 400
     if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        extension = filename.rsplit('.', 1)[1].lower()
+        extension = file.filename.rsplit('.', 1)[1].lower()
         user_email = get_jwt_identity()
         filename = f"user_{uuid.uuid4().hex}.{extension}"
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(file_path)
 
-        # Actualizar la foto de perfil del usuario en la base de datos
+        supabase = app.extensions.get("supabase")
+        if not supabase:
+            return internal_error("Storage no disponible.")
+
+        try:
+            file_bytes = file.read()
+            supabase.upload_storage(
+                BUCKET_PROFILE_PICTURES,
+                filename,
+                file_bytes,
+                content_type=CONTENT_TYPE_MAP.get(extension, "application/octet-stream"),
+            )
+            public_url = supabase.public_storage_url(BUCKET_PROFILE_PICTURES, filename)
+        except Exception:
+            logger.exception("Error al subir imagen a Supabase Storage")
+            return internal_error("Error al subir la imagen.")
+
         user = users_repository.find_by_email(user_email)
         if user:
-            profile_picture_url = f"/uploads/{filename}"
             users_repository.update_by_email(
                 user_email,
-                {'$set': {'profile_picture': profile_picture_url}}
+                {'$set': {'profile_picture': public_url}}
             )
-            return jsonify({'profile_picture': profile_picture_url}), 200
+            return jsonify({'profile_picture': public_url}), 200
         else:
             return jsonify({'message': 'Usuario no encontrado'}), 404
     else:

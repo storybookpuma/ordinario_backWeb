@@ -32,7 +32,7 @@ class SupabaseUsersRepository:
             "username": user["username"],
             "email": user["email"],
             "password_hash": user["password"],
-            "profile_picture": user.get("profile_picture", "/static/uploads/profile_pictures/default_picture.png"),
+            "profile_picture": user.get("profile_picture") or None,
         }
         created_user = self.client.insert_one(self.table, payload)
         return InsertOneResult(created_user["id"] if created_user else None)

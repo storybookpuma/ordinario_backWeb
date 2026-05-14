@@ -67,6 +67,25 @@ class SupabaseRestClient:
         response.raise_for_status()
         return response.text
 
+    def upload_storage(self, bucket, path, file_bytes, content_type="application/octet-stream"):
+        storage_url = f"{self.base_url.replace('/rest/v1', '')}/storage/v1/object/{bucket}/{path}"
+        response = requests.post(
+            storage_url,
+            headers={
+                "apikey": self.headers["apikey"],
+                "Authorization": self.headers["Authorization"],
+                "Content-Type": content_type,
+            },
+            data=file_bytes,
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def public_storage_url(self, bucket, path):
+        base = self.base_url.replace("/rest/v1", "")
+        return f"{base}/storage/v1/object/public/{bucket}/{path}"
+
     def rpc(self, function_name, payload):
         response = requests.post(
             f"{self.base_url}/rpc/{function_name}",
