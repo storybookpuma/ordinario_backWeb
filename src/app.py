@@ -1137,8 +1137,26 @@ def top_rated_charts():
 @rate_limit(60)
 def activity_feed():
     limit = get_int_arg('limit', 20, minimum=1, maximum=50)
+    scope = request.args.get('scope', 'global').strip()
 
-    cache_key = f"activity:global:{limit}"
+    user_email = get_jwt_identity()
+    current_user = users_repository.find_by_email(user_email)
+    if not current_user:
+        return jsonify({"message": "Usuario no encontrado."}), 404
+
+    current_user_id = str(current_user["_id"])
+    is_personalized = scope == 'personalized'
+
+    if is_personalized:
+        following_ids = current_user.get('following', [])
+        relevant_ids = list(set(following_ids + [current_user_id]))
+        if not relevant_ids:
+            return jsonify({"activities": []}), 200
+        cache_key = f"activity:personalized:{current_user_id}:{limit}"
+    else:
+        relevant_ids = None
+        cache_key = f"activity:global:{limit}"
+
     cached = app.extensions["cache"].get(cache_key)
     if cached is not None:
         return jsonify({"activities": cached}), 200
@@ -1147,18 +1165,26 @@ def activity_feed():
         activities = []
 
         if app.config["DATABASE_PROVIDER"] == "mongo":
-            recent_comments = comments_repository.collection.find().sort('timestamp', -1).limit(limit)
+            if is_personalized:
+                comment_filter = {'user_id': {'$in': relevant_ids}}
+                rating_filter = {'userId': {'$in': relevant_ids}}
+            else:
+                comment_filter = {}
+                rating_filter = {}
+
+            recent_comments = comments_repository.collection.find(comment_filter).sort('timestamp', -1).limit(limit)
             for c in recent_comments:
                 activities.append({
                     "type": "comment",
                     "entityType": c.get("entity_type"),
                     "entityId": str(c.get("entity_id")),
                     "username": c.get("username"),
+                    "userPhoto": c.get("user_photo"),
                     "text": c.get("comment_text"),
                     "timestamp": c.get("timestamp").isoformat() if c.get("timestamp") else None,
                 })
 
-            recent_ratings = ratings_repository.collection.find().sort('timestamp', -1).limit(limit)
+            recent_ratings = ratings_repository.collection.find(rating_filter).sort('timestamp', -1).limit(limit)
             for r in recent_ratings:
                 user = users_repository.find_by_id(r.get("userId"))
                 activities.append({
@@ -1166,12 +1192,23 @@ def activity_feed():
                     "entityType": r.get("entityType"),
                     "entityId": r.get("entityId"),
                     "username": user.get("username") if user else "Usuario",
+                    "userPhoto": user.get("profile_picture") if user else None,
                     "rating": r.get("rating"),
                     "timestamp": r.get("timestamp").isoformat() if r.get("timestamp") else None,
                 })
         else:
             # Supabase path: fetch recent items from each table
-            comment_rows = repositories.comments.client.select("comments", limit=limit, order="created_at.desc")
+            comment_kwargs = {"limit": limit, "order": "created_at.desc"}
+            rating_kwargs = {"limit": limit, "order": "created_at.desc"}
+            favorite_kwargs = {"limit": limit, "order": "created_at.desc"}
+
+            if is_personalized:
+                ids_csv = ",".join(relevant_ids)
+                comment_kwargs["user_id_in"] = ids_csv
+                rating_kwargs["user_id_in"] = ids_csv
+                favorite_kwargs["user_id_in"] = ids_csv
+
+            comment_rows = repositories.comments.client.select("comments", **comment_kwargs)
             for row in comment_rows:
                 user = users_repository.find_by_id(row.get("user_id"))
                 activities.append({
@@ -1179,11 +1216,12 @@ def activity_feed():
                     "entityType": row.get("entity_type"),
                     "entityId": row.get("entity_id"),
                     "username": user.get("username") if user else "Usuario",
+                    "userPhoto": user.get("profile_picture") if user else None,
                     "text": row.get("comment_text"),
                     "timestamp": row.get("created_at"),
                 })
 
-            rating_rows = repositories.ratings.client.select("ratings", limit=limit, order="created_at.desc")
+            rating_rows = repositories.ratings.client.select("ratings", **rating_kwargs)
             for row in rating_rows:
                 user = users_repository.find_by_id(row.get("user_id"))
                 activities.append({
@@ -1191,11 +1229,12 @@ def activity_feed():
                     "entityType": row.get("entity_type"),
                     "entityId": row.get("entity_id"),
                     "username": user.get("username") if user else "Usuario",
+                    "userPhoto": user.get("profile_picture") if user else None,
                     "rating": row.get("rating"),
                     "timestamp": row.get("created_at"),
                 })
 
-            favorite_rows = repositories.favorites.client.select("favorites", limit=limit, order="created_at.desc")
+            favorite_rows = repositories.favorites.client.select("favorites", **favorite_kwargs)
             for row in favorite_rows:
                 user = users_repository.find_by_id(row.get("user_id"))
                 activities.append({
@@ -1203,6 +1242,7 @@ def activity_feed():
                     "entityType": row.get("entity_type"),
                     "entityId": row.get("entity_id"),
                     "username": user.get("username") if user else "Usuario",
+                    "userPhoto": user.get("profile_picture") if user else None,
                     "name": row.get("name"),
                     "timestamp": row.get("created_at"),
                 })

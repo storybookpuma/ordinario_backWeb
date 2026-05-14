@@ -29,5 +29,10 @@ class TimedCache:
     def delete(self, key):
         self._store.pop(key, None)
 
+    def delete_prefix(self, prefix):
+        keys_to_remove = [k for k in self._store if k.startswith(prefix)]
+        for k in keys_to_remove:
+            self._store.pop(k, None)
+
     def clear(self):
         self._store.clear()

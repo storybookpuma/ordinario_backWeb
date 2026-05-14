@@ -20,9 +20,7 @@ def _invalidate_rating_cache(entity_type, entity_id):
         cache.delete(f"charts:top_rated:{entity_type}:10")
         cache.delete(f"charts:top_rated:{entity_type}:20")
         cache.delete(f"charts:top_rated:{entity_type}:50")
-        cache.delete(f"activity:global:10")
-        cache.delete(f"activity:global:20")
-        cache.delete(f"activity:global:50")
+        cache.delete_prefix("activity:")
 
 
 def _validate_rating_payload(data):
