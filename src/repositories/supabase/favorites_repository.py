@@ -28,6 +28,7 @@ class SupabaseFavoritesRepository:
             "entity_id": favorite["entityId"],
             "name": favorite.get("name"),
             "image": favorite.get("image"),
+            "artist": favorite.get("artist"),
         })
 
     def remove_for_email(self, email, entity_id):
@@ -43,4 +44,5 @@ class SupabaseFavoritesRepository:
             "entityId": favorite["entity_id"],
             "name": favorite.get("name"),
             "image": favorite.get("image"),
+            "artist": favorite.get("artist"),
         }

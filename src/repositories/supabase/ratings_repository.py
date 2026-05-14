@@ -15,19 +15,29 @@ class SupabaseRatingsRepository:
             user_id=str(user_id),
         ))
 
-    def create(self, entity_type, entity_id, user_id, rating):
+    def create(self, entity_type, entity_id, user_id, rating, name=None, image=None, artist=None):
         return self.client.insert_one(self.table, {
             "entity_type": entity_type,
             "entity_id": entity_id,
             "user_id": str(user_id),
             "rating": rating,
+            "name": name,
+            "image": image,
+            "artist": artist,
         })
 
-    def update_rating(self, entity_type, entity_id, user_id, rating):
+    def update_rating(self, entity_type, entity_id, user_id, rating, name=None, image=None, artist=None):
+        payload = {"rating": rating}
+        if name is not None:
+            payload["name"] = name
+        if image is not None:
+            payload["image"] = image
+        if artist is not None:
+            payload["artist"] = artist
         return self.client.update(
             self.table,
             {"entity_type": entity_type, "entity_id": entity_id, "user_id": str(user_id)},
-            {"rating": rating},
+            payload,
         )
 
     def delete_rating(self, entity_type, entity_id, user_id):
@@ -55,7 +65,7 @@ class SupabaseRatingsRepository:
         for row in rows:
             eid = row["entity_id"]
             if eid not in grouped:
-                grouped[eid] = {"ratings": [], "count": 0}
+                grouped[eid] = {"ratings": [], "count": 0, "name": row.get("name"), "image": row.get("image"), "artist": row.get("artist")}
             grouped[eid]["ratings"].append(row["rating"])
             grouped[eid]["count"] += 1
 
@@ -66,6 +76,9 @@ class SupabaseRatingsRepository:
                 "_id": eid,
                 "averageRating": avg,
                 "ratingCount": data["count"],
+                "name": data["name"],
+                "image": data["image"],
+                "artist": data["artist"],
             })
 
         results.sort(key=lambda x: (-x["averageRating"], -x["ratingCount"]))
@@ -80,4 +93,7 @@ class SupabaseRatingsRepository:
             "entityId": rating["entity_id"],
             "userId": rating["user_id"],
             "rating": rating["rating"],
+            "name": rating.get("name"),
+            "image": rating.get("image"),
+            "artist": rating.get("artist"),
         }

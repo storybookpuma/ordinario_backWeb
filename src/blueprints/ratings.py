@@ -34,7 +34,11 @@ def _validate_rating_payload(data):
     if not isinstance(rating, int) or not (1 <= rating <= 10):
         raise ValidationError({"rating": ["La calificación debe ser un número entre 1 y 10."]})
 
-    return entity_type, entity_id, rating
+    name = get_string_field(data, "name", required=False, max_length=200)
+    image = get_string_field(data, "image", required=False, max_length=1000)
+    artist = get_string_field(data, "artist", required=False, max_length=200)
+
+    return entity_type, entity_id, rating, name, image, artist
 
 
 @bp.route("/rate_entity", methods=["POST"])
@@ -43,7 +47,7 @@ def _validate_rating_payload(data):
 def rate_entity():
     try:
         data = get_json_body()
-        entity_type, entity_id, rating = _validate_rating_payload(data)
+        entity_type, entity_id, rating, name, image, artist = _validate_rating_payload(data)
 
         logger.info(f"rate_entity: entity_type={entity_type}, entity_id={entity_id}, rating={rating}")
 
@@ -60,7 +64,7 @@ def rate_entity():
             logger.info(f"Usuario {user_email} ya ha calificado la entidad {entity_id}")
             return jsonify({"message": "Ya has calificado esta entidad."}), 400
 
-        repos.ratings.create(entity_type, entity_id, user_id, rating)
+        repos.ratings.create(entity_type, entity_id, user_id, rating, name=name, image=image, artist=artist)
         summary = repos.ratings.summarize_entity(entity_type, entity_id)
         _invalidate_rating_cache(entity_type, entity_id)
         logger.info(f"Entidad {entity_id} averageRating={summary['averageRating']}, ratingCount={summary['ratingCount']}")
@@ -83,7 +87,7 @@ def rate_entity():
 def update_rate_entity():
     try:
         data = get_json_body()
-        entity_type, entity_id, rating = _validate_rating_payload(data)
+        entity_type, entity_id, rating, name, image, artist = _validate_rating_payload(data)
 
         repos = _get_repos()
         user_email = get_jwt_identity()
@@ -96,7 +100,7 @@ def update_rate_entity():
         if not existing:
             return jsonify({"message": "Aún no has calificado esta entidad."}), 404
 
-        repos.ratings.update_rating(entity_type, entity_id, user_id, rating)
+        repos.ratings.update_rating(entity_type, entity_id, user_id, rating, name=name, image=image, artist=artist)
         summary = repos.ratings.summarize_entity(entity_type, entity_id)
         _invalidate_rating_cache(entity_type, entity_id)
         return jsonify({

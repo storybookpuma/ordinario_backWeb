@@ -25,6 +25,7 @@ def add_favorite():
         entity_id = get_string_field(data, "entityId", max_length=120)
         name = get_string_field(data, "name", required=False, max_length=200)
         image = get_string_field(data, "image", required=False, max_length=1000)
+        artist = get_string_field(data, "artist", required=False, max_length=200)
 
         repos = _get_repos()
         current_user_email = get_jwt_identity()
@@ -40,6 +41,7 @@ def add_favorite():
             "entityId": entity_id,
             "name": name,
             "image": image,
+            "artist": artist,
         }
         repos.favorites.add_for_email(current_user_email, new_favorite)
         return jsonify({"message": "Favorito agregado exitosamente."}), 200

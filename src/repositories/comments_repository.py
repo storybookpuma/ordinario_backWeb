@@ -9,6 +9,9 @@ class CommentsRepository:
         result = self.collection.insert_one(comment)
         return self.find_by_id(result.inserted_id)
 
+    def update_by_id(self, comment_id, update_fields):
+        return self.collection.update_one({'_id': ObjectId(comment_id)}, update_fields)
+
     def find_by_id(self, comment_id):
         return self.collection.find_one({'_id': ObjectId(comment_id)})
 

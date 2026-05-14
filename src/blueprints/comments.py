@@ -52,6 +52,9 @@ def add_comment(entity_type, entity_id):
 
         data = get_json_body()
         comment_text = get_string_field(data, "comment_text", max_length=500)
+        name = get_string_field(data, "name", required=False, max_length=200)
+        image = get_string_field(data, "image", required=False, max_length=1000)
+        artist = get_string_field(data, "artist", required=False, max_length=200)
 
         entity_obj_id = _resolve_entity_read(entity_type, entity_id)
         if entity_obj_id is None:
@@ -64,6 +67,9 @@ def add_comment(entity_type, entity_id):
             "username": username,
             "user_photo": user_photo,
             "comment_text": comment_text,
+            "name": name,
+            "image": image,
+            "artist": artist,
             "timestamp": datetime.now(timezone.utc),
             "likes": 0,
             "dislikes": 0,

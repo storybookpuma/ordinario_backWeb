@@ -1119,9 +1119,9 @@ def top_rated_charts():
                 "entityId": item["_id"],
                 "averageRating": round(item["averageRating"], 2) if item["averageRating"] else 0,
                 "ratingCount": item["ratingCount"],
-                "name": meta.get("name") or item["_id"],
-                "image": meta.get("image"),
-                "artist": meta.get("artist"),
+                "name": meta.get("name") or item.get("name") or item["_id"],
+                "image": meta.get("image") or item.get("image"),
+                "artist": meta.get("artist") or item.get("artist"),
             })
 
         app.extensions["cache"].set(cache_key, results, ttl=600)
@@ -1181,6 +1181,9 @@ def activity_feed():
                     "username": c.get("username"),
                     "userPhoto": c.get("user_photo"),
                     "text": c.get("comment_text"),
+                    "name": c.get("name"),
+                    "image": c.get("image"),
+                    "artist": c.get("artist"),
                     "timestamp": c.get("timestamp").isoformat() if c.get("timestamp") else None,
                 })
 
@@ -1194,6 +1197,9 @@ def activity_feed():
                     "username": user.get("username") if user else "Usuario",
                     "userPhoto": user.get("profile_picture") if user else None,
                     "rating": r.get("rating"),
+                    "name": r.get("name"),
+                    "image": r.get("image"),
+                    "artist": r.get("artist"),
                     "timestamp": r.get("timestamp").isoformat() if r.get("timestamp") else None,
                 })
         else:
@@ -1218,6 +1224,9 @@ def activity_feed():
                     "username": user.get("username") if user else "Usuario",
                     "userPhoto": user.get("profile_picture") if user else None,
                     "text": row.get("comment_text"),
+                    "name": row.get("name"),
+                    "image": row.get("image"),
+                    "artist": row.get("artist"),
                     "timestamp": row.get("created_at"),
                 })
 
@@ -1231,6 +1240,9 @@ def activity_feed():
                     "username": user.get("username") if user else "Usuario",
                     "userPhoto": user.get("profile_picture") if user else None,
                     "rating": row.get("rating"),
+                    "name": row.get("name"),
+                    "image": row.get("image"),
+                    "artist": row.get("artist"),
                     "timestamp": row.get("created_at"),
                 })
 
@@ -1244,6 +1256,8 @@ def activity_feed():
                     "username": user.get("username") if user else "Usuario",
                     "userPhoto": user.get("profile_picture") if user else None,
                     "name": row.get("name"),
+                    "image": row.get("image"),
+                    "artist": row.get("artist"),
                     "timestamp": row.get("created_at"),
                 })
 

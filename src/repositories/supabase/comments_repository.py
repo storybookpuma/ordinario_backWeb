@@ -15,6 +15,9 @@ class SupabaseCommentsRepository:
             "entity_id": str(comment["entity_id"]),
             "user_id": str(comment["user_id"]),
             "comment_text": comment["comment_text"],
+            "name": comment.get("name"),
+            "image": comment.get("image"),
+            "artist": comment.get("artist"),
         })
         return self._to_app_comment(row)
 
@@ -107,6 +110,9 @@ class SupabaseCommentsRepository:
             "user_photo": user.get("profile_picture", "") if user else "",
             "user_email": user.get("email", "") if user else "",
             "comment_text": comment["comment_text"],
+            "name": comment.get("name"),
+            "image": comment.get("image"),
+            "artist": comment.get("artist"),
             "timestamp": self._parse_timestamp(comment["created_at"]),
             "likes": len(liked_by),
             "dislikes": len(disliked_by),

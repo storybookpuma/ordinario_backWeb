@@ -18,19 +18,33 @@ class RatingsRepository:
             'userId': user_id,
         })
 
-    def create(self, entity_type, entity_id, user_id, rating):
-        return self.collection.insert_one({
+    def create(self, entity_type, entity_id, user_id, rating, name=None, image=None, artist=None):
+        doc = {
             'entityType': entity_type,
             'entityId': entity_id,
             'userId': user_id,
             'rating': rating,
             'timestamp': datetime.utcnow(),
-        })
+        }
+        if name is not None:
+            doc['name'] = name
+        if image is not None:
+            doc['image'] = image
+        if artist is not None:
+            doc['artist'] = artist
+        return self.collection.insert_one(doc)
 
-    def update_rating(self, entity_type, entity_id, user_id, rating):
+    def update_rating(self, entity_type, entity_id, user_id, rating, name=None, image=None, artist=None):
+        update = {'$set': {'rating': rating, 'timestamp': datetime.utcnow()}}
+        if name is not None:
+            update['$set']['name'] = name
+        if image is not None:
+            update['$set']['image'] = image
+        if artist is not None:
+            update['$set']['artist'] = artist
         return self.collection.update_one(
             {'entityType': entity_type, 'entityId': entity_id, 'userId': user_id},
-            {'$set': {'rating': rating, 'timestamp': datetime.utcnow()}}
+            update
         )
 
     def delete_rating(self, entity_type, entity_id, user_id):
@@ -65,6 +79,9 @@ class RatingsRepository:
                 '_id': '$entityId',
                 'averageRating': {'$avg': '$rating'},
                 'ratingCount': {'$sum': 1},
+                'name': {'$first': '$name'},
+                'image': {'$first': '$image'},
+                'artist': {'$first': '$artist'},
             }},
             {'$match': {'ratingCount': {'$gte': 1}}},
             {'$sort': {'averageRating': -1, 'ratingCount': -1}},
