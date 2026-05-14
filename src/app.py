@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, redirect
+from flask import Flask, request, jsonify, redirect, g
 from flask_pymongo import PyMongo
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timezone, timedelta
@@ -6,8 +6,11 @@ from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity
 from marshmallow import Schema, fields, ValidationError
 from dotenv import load_dotenv
 from urllib.parse import urlencode
+from functools import wraps
 import base64
 import json
+import time
+import uuid
 
 load_dotenv()
 
@@ -21,6 +24,11 @@ import requests
 import os
 import logging
 
+
+VALID_ENTITY_TYPES = {'profile', 'song', 'album', 'artist'}
+RATE_LIMIT_BUCKETS = {}
+RATE_LIMIT_WINDOW_SECONDS = 60
+
 app = Flask(__name__)
 
 # Configuración de Flask y MongoDB
@@ -30,6 +38,77 @@ app.secret_key = app.config["SECRET_KEY"]
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def json_error(message, status_code=400, *, code=None):
+    payload = {
+        "message": message,
+        "request_id": getattr(g, "request_id", None),
+    }
+    if code:
+        payload["code"] = code
+    return jsonify(payload), status_code
+
+
+def internal_error(message="Error interno del servidor."):
+    return json_error(message, 500, code="internal_error")
+
+
+def get_json_body():
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
+
+def get_string_field(data, field, *, required=True, max_length=None):
+    value = data.get(field, "")
+    if not isinstance(value, str):
+        raise ValidationError({field: ["Debe ser texto."]})
+
+    value = value.strip()
+    if required and not value:
+        raise ValidationError({field: ["Este campo es obligatorio."]})
+    if max_length and len(value) > max_length:
+        raise ValidationError({field: [f"Debe tener máximo {max_length} caracteres."]})
+    return value
+
+
+def get_int_arg(name, default, *, minimum=0, maximum=None):
+    raw_value = request.args.get(name, default)
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError({name: ["Debe ser un número entero."]}) from exc
+
+    if value < minimum:
+        raise ValidationError({name: [f"Debe ser mayor o igual a {minimum}."]})
+    if maximum is not None and value > maximum:
+        return maximum
+    return value
+
+
+def validate_entity_type(entity_type):
+    if entity_type not in VALID_ENTITY_TYPES:
+        raise ValidationError({"entity_type": [f"Debe ser uno de {sorted(VALID_ENTITY_TYPES)}."]})
+
+
+def rate_limit(limit, window_seconds=RATE_LIMIT_WINDOW_SECONDS):
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            identifier = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+            key = (fn.__name__, identifier)
+            now = time.time()
+            bucket = [timestamp for timestamp in RATE_LIMIT_BUCKETS.get(key, []) if now - timestamp < window_seconds]
+
+            if len(bucket) >= limit:
+                RATE_LIMIT_BUCKETS[key] = bucket
+                return json_error("Demasiadas solicitudes. Intenta de nuevo en unos segundos.", 429, code="rate_limited")
+
+            bucket.append(now)
+            RATE_LIMIT_BUCKETS[key] = bucket
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 def get_spotify_redirect_uri():
@@ -66,6 +145,42 @@ def build_frontend_redirect_url(return_url, token):
     return f"{base_url}{separator}{urlencode({'token': token})}"
 
 
+def serialize_current_user(user):
+    user_id = user.get('_id') or user.get('id')
+    return {
+        "id": str(user_id) if user_id is not None else "",
+        "username": user.get('username'),
+        "email": user.get('email'),
+        "profile_picture": user.get('profile_picture', ""),
+        "favorites": user.get('favorites', []),
+        "followers": user.get('followers', []),
+        "following": user.get('following', []),
+        "trivia_scores": user.get('trivia_scores', []),
+    }
+
+
+def serialize_public_profile(user, *, include_favorites=False):
+    user_id = user.get('_id') or user.get('id')
+    profile = {
+        "id": str(user_id) if user_id is not None else "",
+        "username": user.get('username', ''),
+        "profile_picture": user.get('profile_picture', ''),
+    }
+    if include_favorites:
+        profile["favorites"] = user.get('favorites', [])
+    return profile
+
+
+def serialize_public_comment(comment, entity_type):
+    serialized = serialize_comment(comment, entity_type)
+    serialized.pop('user_email', None)
+    return serialized
+
+
+def create_session_token(email):
+    return create_access_token(identity=email, expires_delta=timedelta(days=30))
+
+
 # Leer la clave de API desde las variables de entorno
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 
@@ -81,6 +196,33 @@ if app.config["CORS_ORIGINS"]:
     CORS(app, origins=app.config["CORS_ORIGINS"])
 else:
     CORS(app)
+
+
+@app.before_request
+def assign_request_id():
+    g.request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+
+
+@app.after_request
+def add_request_id_header(response):
+    response.headers["X-Request-ID"] = getattr(g, "request_id", "")
+    return response
+
+
+@app.errorhandler(ValidationError)
+def handle_validation_error(e):
+    return jsonify({"message": "Datos inválidos.", "errors": e.messages, "request_id": getattr(g, "request_id", None)}), 400
+
+
+@app.errorhandler(404)
+def handle_not_found(_error):
+    return json_error("Ruta no encontrada.", 404, code="not_found")
+
+
+@app.errorhandler(500)
+def handle_unexpected_error(error):
+    logger.exception("Unhandled server error", exc_info=error)
+    return internal_error()
 
 UPLOAD_FOLDER = app.config['UPLOAD_FOLDER']
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
@@ -136,22 +278,38 @@ class UserSchema(Schema):
 
 user_schema = UserSchema()
 
-@app.errorhandler(ValidationError)
-def handle_validation_error(e):
-    return jsonify({"error": e.messages}), 400
+
+@app.route('/healthz', methods=['GET'])
+def healthz():
+    return jsonify({"status": "ok", "request_id": getattr(g, "request_id", None)}), 200
+
+
+@app.route('/readyz', methods=['GET'])
+def readyz():
+    try:
+        if app.config["DATABASE_PROVIDER"] == "mongo" and mongo is not None:
+            mongo.cx.admin.command('ping')
+        return jsonify({
+            "status": "ready",
+            "database_provider": app.config["DATABASE_PROVIDER"],
+            "request_id": getattr(g, "request_id", None),
+        }), 200
+    except Exception:
+        logger.exception("Readiness check failed")
+        return json_error("El servicio no está listo.", 503, code="not_ready")
+
 
 # ------------------------------ Rutas de Usuario ----------------------------------
 
 # Endpoint para registro
 @app.route('/register', methods=['POST'])
+@rate_limit(8)
 def register():
-    data = request.get_json()
-    username = data.get('username', '').strip()
-    email = data.get('email', '').strip()
-    password = data.get('password', '').strip()
-
-    if not username or not email or not password:
-        return jsonify({'message': 'Todos los campos son obligatorios'}), 400
+    data = get_json_body()
+    username = get_string_field(data, 'username', max_length=40)
+    email = get_string_field(data, 'email', max_length=120).lower()
+    password = get_string_field(data, 'password', max_length=128)
+    user_schema.load({"username": username, "email": email, "password": password})
 
     # Verificar si el usuario ya existe
     existing_user = users_repository.find_by_email(email)
@@ -167,16 +325,13 @@ def register():
         'profile_picture': '/static/uploads/profile_pictures/default_picture.png',
         'favorites': []
     }
-    users_repository.create(user)
+    created_user = users_repository.create(user)
+    if getattr(created_user, 'inserted_id', None):
+        user['_id'] = created_user.inserted_id
 
     # Crear el token JWT
-    access_token = create_access_token(identity=email)
-    user_data = {
-        'username': username,
-        'email': email,
-        'profile_picture': user['profile_picture'],
-        'favorites': []
-    }
+    access_token = create_session_token(email)
+    user_data = serialize_current_user(user)
 
     # Redirigir al flujo de autenticación de Spotify
     response = jsonify({'jwt': access_token, 'user': user_data})
@@ -185,40 +340,38 @@ def register():
 
 # Endpoint para inicio de sesión
 @app.route('/login', methods=['POST'])
+@rate_limit(10)
 def login():
     try:
-        data = request.get_json()
-        email = data.get('email')
-        password = data.get('password')
+        data = get_json_body()
+        email = get_string_field(data, 'email', max_length=120).lower()
+        password = get_string_field(data, 'password', max_length=128)
 
         # Validar si el usuario existe
         user = users_repository.find_by_email(email)
         if not user or not check_password_hash(user['password'], password):
             return jsonify({'message': 'Correo o contraseña incorrectos'}), 401
 
-        # Crear un token JWT para el usuario
-        expires = timedelta(hours=1)
-        jwt_token = create_access_token(identity=email, expires_delta=expires)
+        # Crear un token JWT persistente para evitar pedir login en cada reinicio de app.
+        jwt_token = create_session_token(email)
 
         # Devolver el token JWT y los datos del usuario
-        user_data = {
-            "username": user.get('username'),
-            "email": user.get('email'),
-            "profile_picture": user.get('profile_picture', ""),
-            "favorites": user.get('favorites', []),
-            "trivia_scores": user.get('trivia_scores', [])
-        }
+        user_data = serialize_current_user(user)
         return jsonify({
             "message": "Inicio de sesión exitoso",
             "jwt": jwt_token,
             "user": user_data
         }), 200
 
+    except ValidationError as e:
+        raise e
     except Exception as e:
-        return jsonify({"message": f"Error al iniciar sesión: {str(e)}"}), 500
+        logger.exception("Error en login")
+        return internal_error("Error al iniciar sesión.")
 
 # Endpoint para iniciar la autenticación con Spotify
 @app.route('/auth/spotify')
+@rate_limit(20)
 def auth_spotify():
     user_email = request.args.get('state')
     return_url = request.args.get('return_url')
@@ -258,7 +411,7 @@ def spotify_callback():
         )
 
         # Crear un nuevo JWT que indica que la autenticación está completa
-        new_jwt = create_access_token(identity=user_email)
+        new_jwt = create_session_token(user_email)
 
         # Redirigir al frontend utilizando un deep link
         redirect_url = build_frontend_redirect_url(return_url, new_jwt)
@@ -270,6 +423,7 @@ def spotify_callback():
 
 @app.route('/update_profile_picture', methods=['POST'])
 @jwt_required()
+@rate_limit(20)
 def update_profile_picture():
     if 'profile_picture' not in request.files:
         return jsonify({'message': 'No se encontró el archivo en la solicitud'}), 400
@@ -278,8 +432,9 @@ def update_profile_picture():
         return jsonify({'message': 'No se seleccionó ningún archivo'}), 400
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
+        extension = filename.rsplit('.', 1)[1].lower()
         user_email = get_jwt_identity()
-        filename = f"user_{user_email}_{filename}"
+        filename = f"user_{uuid.uuid4().hex}.{extension}"
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(file_path)
 
@@ -299,11 +454,10 @@ def update_profile_picture():
     
 @app.route('/update_username', methods=['POST'])
 @jwt_required()
+@rate_limit(20)
 def update_username():
-    data = request.get_json()
-    new_username = data.get('username', '').strip()
-    if not new_username:
-        return jsonify({'message': 'El nombre de usuario no puede estar vacío'}), 400
+    data = get_json_body()
+    new_username = get_string_field(data, 'username', max_length=40)
     # Verificar si el nombre de usuario ya existe
     existing_user = users_repository.find_by_username(new_username)
     if existing_user:
@@ -331,31 +485,26 @@ def get_current_user():
         if not user:
             return jsonify({"message": "Usuario no encontrado."}), 404
 
-        user_data = {
-            "id": str(user['_id']),
-            "username": user.get('username'),
-            "email": user.get('email'),
-            "profile_picture": user.get('profile_picture', ""),
-            "favorites": user.get('favorites', []),
-            "trivia_scores": user.get('trivia_scores', []),
-        }
+        user_data = serialize_current_user(user)
 
         return jsonify({"user": user_data}), 200
 
     except Exception as e:
-        return jsonify({"message": f"Error al obtener el usuario: {str(e)}"}), 500
+        logger.exception("Error al obtener usuario actual")
+        return internal_error("Error al obtener el usuario.")
 
 
 @app.route('/search_song', methods=['GET'])
 @jwt_required()
+@rate_limit(120)
 def search_song():
     current_user = get_jwt_identity()
     access_token = get_valid_spotify_token(current_user, users_repository)
     if not access_token:
         return jsonify({"message": "Por favor, inicia sesión en Spotify para buscar canciones."}), 401
 
-    query = request.args.get('q')
-    limit = int(request.args.get('limit', 10))
+    query = request.args.get('q', '').strip()
+    limit = get_int_arg('limit', 10, minimum=1, maximum=25)
     if not query:
         return jsonify({"message": "Se requiere un parámetro de búsqueda (q)"}), 400
 
@@ -378,11 +527,13 @@ def search_song():
         return jsonify({"tracks": tracks}), 200
 
     except Exception as e:
-        return jsonify({"message": f"Error al buscar la canción: {str(e)}"}), 500
+        logger.exception("Error al buscar canción")
+        return internal_error("Error al buscar la canción.")
 
 
 @app.route('/search_album', methods=['GET'])
 @jwt_required()
+@rate_limit(120)
 def search_album():
     try:
         current_user = get_jwt_identity()
@@ -390,16 +541,11 @@ def search_album():
         if not access_token:
             return jsonify({"message": "Por favor, inicia sesión en Spotify para buscar álbumes."}), 401
 
-        query = request.args.get('q')
-        limit = request.args.get('limit', 10)
+        query = request.args.get('q', '').strip()
+        limit = get_int_arg('limit', 10, minimum=1, maximum=25)
 
         if not query:
             return jsonify({"message": "Se requiere un parámetro de búsqueda (q)"}), 400
-
-        try:
-            limit = int(limit)
-        except ValueError:
-            return jsonify({"message": "El parámetro 'limit' debe ser un número entero."}), 422
 
         sp = spotipy.Spotify(auth=access_token)
         results = sp.search(q=query, type='album', limit=limit)
@@ -418,21 +564,24 @@ def search_album():
 
         return jsonify({"albums": albums}), 200
 
+    except ValidationError as e:
+        raise e
     except Exception as e:
-        app.logger.error(f"Error al buscar el álbum: {str(e)}")
-        return jsonify({"message": f"Error al buscar el álbum: {str(e)}"}), 500
+        app.logger.exception("Error al buscar álbum")
+        return internal_error("Error al buscar el álbum.")
 
     
 @app.route('/search_artist', methods=['GET'])
 @jwt_required()
+@rate_limit(120)
 def search_artist():
     current_user = get_jwt_identity()
     access_token = get_valid_spotify_token(current_user, users_repository)
     if not access_token:
         return jsonify({"message": "Por favor, inicia sesión en Spotify para buscar artistas."}), 401
 
-    query = request.args.get('q')
-    limit = int(request.args.get('limit', 10))
+    query = request.args.get('q', '').strip()
+    limit = get_int_arg('limit', 10, minimum=1, maximum=25)
     if not query:
         return jsonify({"message": "Se requiere un parámetro de búsqueda (q)"}), 400
 
@@ -455,7 +604,8 @@ def search_artist():
         return jsonify({"artists": artists}), 200
 
     except Exception as e:
-        return jsonify({"message": f"Error al buscar el artista: {str(e)}"}), 500
+        logger.exception("Error al buscar artista")
+        return internal_error("Error al buscar el artista.")
     
 
 @app.route('/search_playlist', methods=['GET'])
@@ -495,29 +645,22 @@ def search_playlist():
 @app.route('/search_profile', methods=['GET'])
 @jwt_required()
 def search_profile():
-    query = request.args.get('q')
-    limit = int(request.args.get('limit', 10))
+    query = request.args.get('q', '').strip()
+    limit = get_int_arg('limit', 10, minimum=1, maximum=25)
     if not query:
         return jsonify({"message": "Se requiere un parámetro de búsqueda (q)"}), 400
+    if len(query) > 80:
+        return json_error("La búsqueda es demasiado larga.", 400, code="invalid_query")
 
     try:
         users = users_repository.search_profiles(query, limit)
-
-        profiles = []
-        for user in users:
-            profile_info = {
-                "id": str(user['_id']),
-                "username": user.get('username'),
-                "email": user.get('email'),
-                "profile_picture": user.get('profile_picture'),
-                "favorites": user.get('favorites', []),
-            }
-            profiles.append(profile_info)
+        profiles = [serialize_public_profile(user) for user in users]
 
         return jsonify({"profiles": profiles}), 200
 
     except Exception as e:
-        return jsonify({"message": f"Error al buscar perfiles: {str(e)}"}), 500
+        logger.exception("Error al buscar perfiles")
+        return internal_error("Error al buscar perfiles.")
 
 
 # ------------------------------ Endpoints de HomeScreen ----------------------------------
@@ -874,6 +1017,7 @@ def artist_details():
     
 
 @app.route('/profile_details', methods=['GET'])
+@jwt_required()
 def get_profile_details():
     profile_id = request.args.get('profile_id')
     if not profile_id:
@@ -884,18 +1028,12 @@ def get_profile_details():
         if not user:
             return jsonify({"message": "Perfil no encontrado"}), 404
 
-        # Devuelve datos del usuario similares a los del profile actual
-        profile_data = {
-            "id": str(user['_id']),
-            "username": user.get('username', ''),
-            "email": user.get('email', ''),
-            "profile_picture": user.get('profile_picture', ''), 
-            "favorites": user.get('favorites', []),
-            "comments_enabled": True 
-        }
+        profile_data = serialize_public_profile(user, include_favorites=True)
+        profile_data["comments_enabled"] = True
         return jsonify(profile_data), 200
     except Exception as e:
-        return jsonify({"message": str(e)}), 500
+        logger.exception("Error al cargar perfil")
+        return internal_error("Error al cargar el perfil.")
 
 
 
@@ -940,12 +1078,11 @@ def get_album_tracks():
 
 @app.route('/<entity_type>/<entity_id>/comments', methods=['POST'])
 @jwt_required()
+@rate_limit(30)
 def add_comment(entity_type, entity_id):
     try:
         # Validar entity_type
-        valid_entity_types = ['profile', 'song', 'album', 'artist']
-        if entity_type not in valid_entity_types:
-            return jsonify({"message": f"Tipo de entidad inválido. Debe ser uno de {valid_entity_types}."}), 400
+        validate_entity_type(entity_type)
 
         current_user_email = get_jwt_identity()
         user = users_repository.find_by_email(current_user_email)
@@ -955,14 +1092,10 @@ def add_comment(entity_type, entity_id):
         user_id = str(user['_id'])
         username = user['username']
         user_photo = user.get('profile_picture', "")
-        user_email = user.get('email', "")
 
         # Obtener y validar el texto del comentario
-        data = request.get_json()
-        comment_text = data.get('comment_text', '').strip()
-
-        if not comment_text:
-            return jsonify({"message": "El texto del comentario no puede estar vacío."}), 400
+        data = get_json_body()
+        comment_text = get_string_field(data, 'comment_text', max_length=500)
 
         if entity_type == 'profile':
             entity_obj_id = resolve_profile_entity_id(entity_id)
@@ -986,7 +1119,6 @@ def add_comment(entity_type, entity_id):
             "user_id": user_id,
             "username": username,
             "user_photo": user_photo,
-            "user_email": user_email,
             "comment_text": comment_text,
             "timestamp": datetime.now(timezone.utc),
             "likes": 0,
@@ -996,21 +1128,23 @@ def add_comment(entity_type, entity_id):
         }
 
         inserted_comment = comments_repository.create(comment)
-        inserted_comment = serialize_comment(inserted_comment, entity_type)
+        inserted_comment = serialize_public_comment(inserted_comment, entity_type)
 
         return jsonify({"message": "Comentario agregado exitosamente.", "comment": inserted_comment}), 201
 
+    except ValidationError as e:
+        raise e
     except Exception as e:
-        return jsonify({"message": f"Error al agregar el comentario: {str(e)}"}), 500
+        logger.exception("Error al agregar comentario")
+        return internal_error("Error al agregar el comentario.")
 
 
 @app.route('/<entity_type>/<entity_id>/comments/<comment_id>', methods=['DELETE'])
 @jwt_required()
+@rate_limit(60)
 def delete_comment(entity_type, entity_id, comment_id):
     try:
-        valid_entity_types = ['profile', 'song', 'album', 'artist']
-        if entity_type not in valid_entity_types:
-            return jsonify({"message": f"Tipo de entidad inválido. Debe ser uno de {valid_entity_types}."}), 400
+        validate_entity_type(entity_type)
 
         current_user_email = get_jwt_identity()
         user = users_repository.find_by_email(current_user_email)
@@ -1046,8 +1180,11 @@ def delete_comment(entity_type, entity_id, comment_id):
 
         return jsonify({"message": "Comentario eliminado exitosamente."}), 200
 
+    except ValidationError as e:
+        raise e
     except Exception as e:
-        return jsonify({"message": f"Error al eliminar el comentario: {str(e)}"}), 500
+        logger.exception("Error al eliminar comentario")
+        return internal_error("Error al eliminar el comentario.")
 
 
 @app.route('/<entity_type>/<entity_id>/comments', methods=['GET'])
@@ -1056,10 +1193,7 @@ def get_comments(entity_type, entity_id):
     try:
         app.logger.info(f"Solicitud para obtener comentarios: entity_type={entity_type}, entity_id={entity_id}")
 
-        valid_entity_types = ['profile', 'song', 'album', 'artist']
-        if entity_type not in valid_entity_types:
-            app.logger.warning(f"Tipo de entidad inválido: {entity_type}")
-            return jsonify({"message": f"Tipo de entidad inválido. Debe ser uno de {valid_entity_types}."}), 400
+        validate_entity_type(entity_type)
 
         if entity_type == 'profile':
             entity_obj_id = resolve_profile_entity_id(entity_id)
@@ -1080,13 +1214,11 @@ def get_comments(entity_type, entity_id):
             entity_obj_id = entity_id
 
         try:
-            page = int(request.args.get('page', 1))
-            limit = int(request.args.get('limit', 10))
-            if limit > 100:
-                limit = 100  
-        except ValueError:
+            page = get_int_arg('page', 1, minimum=1)
+            limit = get_int_arg('limit', 10, minimum=1, maximum=100)
+        except ValidationError as exc:
             app.logger.warning("Parámetros de paginación inválidos.")
-            return jsonify({"message": "Los parámetros 'page' y 'limit' deben ser números enteros."}), 400
+            raise exc
 
         skip = (page - 1) * limit
 
@@ -1095,10 +1227,10 @@ def get_comments(entity_type, entity_id):
         comments = []
         for comment in comments_cursor:
             try:
-                comments.append(serialize_comment(comment, entity_type))
+                comments.append(serialize_public_comment(comment, entity_type))
             except Exception as e:
                 app.logger.error(f"Error al procesar el comentario {comment.get('_id')}: {str(e)}")
-                return jsonify({"message": f"Error al procesar un comentario: {str(e)}"}), 500
+                return internal_error("Error al procesar un comentario.")
 
         # Obtener el total de comentarios para calcular el número de páginas
         total_comments = comments_repository.count_for_entity(entity_type, entity_obj_id)
@@ -1116,15 +1248,18 @@ def get_comments(entity_type, entity_id):
             }
         }), 200
 
+    except ValidationError as e:
+        raise e
     except Exception as e:
         app.logger.error(f"Error al obtener los comentarios: {str(e)}")
-        return jsonify({"message": f"Error al obtener los comentarios: {str(e)}"}), 500
+        return internal_error("Error al obtener los comentarios.")
 
 # ------------------------------------ Likes -------------------------------------------------
 
 # Ruta para dar "like" a un comentario
 @app.route('/<entity_type>/<entity_id>/comments/<comment_id>/like', methods=['POST'])
 @jwt_required()
+@rate_limit(120)
 def like_comment(entity_type, entity_id, comment_id):
     try:
         current_user_email = get_jwt_identity()
@@ -1133,9 +1268,7 @@ def like_comment(entity_type, entity_id, comment_id):
             return jsonify({"message": "Usuario no encontrado."}), 404
         user_id = str(user['_id'])  
 
-        valid_entity_types = ['profile', 'song', 'album', 'artist']
-        if entity_type not in valid_entity_types:
-            return jsonify({"message": f"Tipo de entidad inválido. Debe ser uno de {valid_entity_types}."}), 400
+        validate_entity_type(entity_type)
 
         if entity_type == 'profile':
             entity_obj_id = resolve_profile_entity_id(entity_id)
@@ -1181,17 +1314,20 @@ def like_comment(entity_type, entity_id, comment_id):
             liked = True
 
         # Obtener el comentario actualizado
-        updated_comment = serialize_comment(comments_repository.find_by_id(comment_id), entity_type)
+        updated_comment = serialize_public_comment(comments_repository.find_by_id(comment_id), entity_type)
 
         return jsonify({"message": "Like actualizado.", "comment": updated_comment, "liked": liked}), 200
 
+    except ValidationError as e:
+        raise e
     except Exception as e:
-        app.logger.error(f"Error en like_comment: {e}")
-        return jsonify({"message": f"Error al procesar el like: {str(e)}"}), 500
+        app.logger.exception("Error en like_comment")
+        return internal_error("Error al procesar el like.")
 
 
 @app.route('/<entity_type>/<entity_id>/comments/<comment_id>/dislike', methods=['POST'])
 @jwt_required()
+@rate_limit(120)
 def dislike_comment(entity_type, entity_id, comment_id):
     try:
         # Obtener el email del usuario desde el JWT
@@ -1202,9 +1338,7 @@ def dislike_comment(entity_type, entity_id, comment_id):
         user_id = str(user['_id'])
 
         # Validar entity_type
-        valid_entity_types = ['profile', 'song', 'album', 'artist']
-        if entity_type not in valid_entity_types:
-            return jsonify({"message": f"Tipo de entidad inválido. Debe ser uno de {valid_entity_types}."}), 400
+        validate_entity_type(entity_type)
 
         if entity_type == 'profile':
             entity_obj_id = resolve_profile_entity_id(entity_id)
@@ -1251,28 +1385,29 @@ def dislike_comment(entity_type, entity_id, comment_id):
             disliked = True
 
         # Obtener el comentario actualizado
-        updated_comment = serialize_comment(comments_repository.find_by_id(comment_id), entity_type)
+        updated_comment = serialize_public_comment(comments_repository.find_by_id(comment_id), entity_type)
 
         return jsonify({"message": "Dislike actualizado.", "comment": updated_comment, "disliked": disliked}), 200
 
+    except ValidationError as e:
+        raise e
     except Exception as e:
-        app.logger.error(f"Error en dislike_comment: {e}")
-        return jsonify({"message": f"Error al procesar el dislike: {str(e)}"}), 500
+        app.logger.exception("Error en dislike_comment")
+        return internal_error("Error al procesar el dislike.")
 
 
 #------------------------------------ Favoritos ----------------------
 
 @app.route('/add_favorite', methods=['POST'])
 @jwt_required()
+@rate_limit(80)
 def add_favorite():
-    data = request.get_json()
-    entity_type = data.get('entityType')
-    entity_id = data.get('entityId')
-    name = data.get('name')
-    image = data.get('image')
-
-    if not all([entity_type, entity_id]):
-        return jsonify({"message": "Se requiere entityType y entityId."}), 400
+    data = get_json_body()
+    entity_type = get_string_field(data, 'entityType', max_length=20)
+    validate_entity_type(entity_type)
+    entity_id = get_string_field(data, 'entityId', max_length=120)
+    name = get_string_field(data, 'name', required=False, max_length=200)
+    image = get_string_field(data, 'image', required=False, max_length=1000)
 
     current_user_email = get_jwt_identity()
     user = users_repository.find_by_email(current_user_email)
@@ -1296,12 +1431,10 @@ def add_favorite():
 
 @app.route('/remove_favorite', methods=['POST'])
 @jwt_required()
+@rate_limit(80)
 def remove_favorite():
-    data = request.get_json()
-    entity_id = data.get('entityId')
-
-    if not entity_id:
-        return jsonify({"message": "Se requiere entityId."}), 400
+    data = get_json_body()
+    entity_id = get_string_field(data, 'entityId', max_length=120)
 
     current_user_email = get_jwt_identity()
 
@@ -1355,17 +1488,14 @@ def recently_listened():
 
 @app.route('/rate_entity', methods=['POST'])
 @jwt_required()
+@rate_limit(60)
 def rate_entity():
-    data = request.get_json()
-    entity_type = data.get('entityType') 
-    entity_id = data.get('entityId')
+    data = get_json_body()
+    entity_type = get_string_field(data, 'entityType', max_length=20)
+    entity_id = get_string_field(data, 'entityId', max_length=120)
     rating = data.get('rating')  # Número entre 1 y 10
 
     logger.info(f"Received rate_entity request: entity_type={entity_type}, entity_id={entity_id}, rating={rating}")
-
-    if not entity_type or not entity_id or rating is None:
-        logger.warning("Missing fields in rate_entity request.")
-        return jsonify({'message': 'Todos los campos son obligatorios.'}), 400
 
     if entity_type not in ['song', 'album', 'artist']:
         logger.warning(f"Invalid entityType: {entity_type}")
@@ -1412,8 +1542,8 @@ def rate_entity():
 @app.route('/get_user_rating', methods=['GET'])
 @jwt_required()
 def get_user_rating():
-    entity_type = request.args.get('entityType')  
-    entity_id = request.args.get('entityId')
+    entity_type = request.args.get('entityType', '').strip()
+    entity_id = request.args.get('entityId', '').strip()
 
     logger.info(f"Solicitud para obtener calificación: entity_type={entity_type}, entity_id={entity_id}")
 
@@ -1450,16 +1580,15 @@ def get_user_rating():
 
 @app.route('/follow_user', methods=['POST'])
 @jwt_required()
+@rate_limit(60)
 def follow_user():
     current_user_email = get_jwt_identity()
     current_user = users_repository.find_by_email(current_user_email)
     if not current_user:
         return jsonify({"message": "Usuario no encontrado"}), 404
 
-    data = request.get_json()
-    profile_id = data.get("profile_id")
-    if not profile_id:
-        return jsonify({"message": "Se requiere profile_id"}), 400
+    data = get_json_body()
+    profile_id = get_string_field(data, "profile_id", max_length=120)
 
     target_user = users_repository.find_by_id(profile_id)
     if not target_user:
@@ -1478,16 +1607,15 @@ def follow_user():
 
 @app.route('/unfollow_user', methods=['POST'])
 @jwt_required()
+@rate_limit(60)
 def unfollow_user():
     current_user_email = get_jwt_identity()
     current_user = users_repository.find_by_email(current_user_email)
     if not current_user:
         return jsonify({"message": "Usuario no encontrado"}), 404
 
-    data = request.get_json()
-    profile_id = data.get("profile_id")
-    if not profile_id:
-        return jsonify({"message": "Se requiere profile_id"}), 400
+    data = get_json_body()
+    profile_id = get_string_field(data, "profile_id", max_length=120)
 
     target_user = users_repository.find_by_id(profile_id)
     if not target_user:
@@ -1511,10 +1639,11 @@ def get_following_details():
     if not current_user:
         return jsonify({"message": "Usuario no encontrado"}), 404
 
-    data = request.get_json()
+    data = get_json_body()
     ids = data.get("ids", [])
     if not isinstance(ids, list):
         return jsonify({"message": "El campo 'ids' debe ser una lista."}), 400
+    ids = [str(item) for item in ids[:100] if item]
 
     found_users = users_repository.find_many_by_ids(ids)
 
