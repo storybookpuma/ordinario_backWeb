@@ -17,8 +17,10 @@ def _invalidate_rating_cache(entity_type, entity_id):
     cache = current_app.extensions.get("cache")
     if cache:
         cache.delete(f"details:{entity_type}:{entity_id}")
+        cache.delete(f"charts:top_rated:{entity_type}:10")
         cache.delete(f"charts:top_rated:{entity_type}:20")
         cache.delete(f"charts:top_rated:{entity_type}:50")
+        cache.delete(f"activity:global:10")
         cache.delete(f"activity:global:20")
         cache.delete(f"activity:global:50")
 

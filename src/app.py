@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, redirect, g
+from flask import Flask, request, jsonify, redirect, g, send_from_directory
 from flask_pymongo import PyMongo
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timezone, timedelta
@@ -142,6 +142,11 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+@app.route('/uploads/<path:filename>', methods=['GET'])
+def uploaded_profile_picture(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 
 def resolve_profile_entity_id(entity_id):
@@ -328,7 +333,7 @@ def update_profile_picture():
         # Actualizar la foto de perfil del usuario en la base de datos
         user = users_repository.find_by_email(user_email)
         if user:
-            profile_picture_url = f"/uploads/{filename}"  # Ruta accesible al frontend
+            profile_picture_url = f"/uploads/{filename}"
             users_repository.update_by_email(
                 user_email,
                 {'$set': {'profile_picture': profile_picture_url}}
