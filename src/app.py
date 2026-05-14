@@ -1057,6 +1057,36 @@ def recently_listened():
         return jsonify({'error': 'Error al obtener canciones reproducidas recientemente.'}), 500
 
 
+@app.route('/spotify/currently_playing', methods=['GET'])
+@jwt_required()
+@rate_limit(60)
+def spotify_currently_playing():
+    user_email = get_jwt_identity()
+    access_token = get_valid_spotify_token(user_email, users_repository)
+    if not access_token:
+        return jsonify({'error': 'Por favor, inicia sesión en Spotify.'}), 401
+
+    try:
+        sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
+        current = sp.current_user_playing_track()
+        if not current or not current.get('item'):
+            return jsonify({'is_playing': False, 'item': None}), 200
+
+        track = current['item']
+        item = {
+            'id': track['id'],
+            'name': track['name'],
+            'artists': [artist['name'] for artist in track['artists']],
+            'album': track['album']['name'],
+            'cover_image': track['album']['images'][0]['url'] if track['album']['images'] else None,
+            'url': track['external_urls']['spotify'],
+        }
+        return jsonify({'is_playing': current.get('is_playing', False), 'item': item}), 200
+    except Exception as e:
+        logger.exception("Error al obtener currently playing")
+        return jsonify({'error': 'Error al obtener la canción actual.'}), 500
+
+
 @app.route('/charts/top_rated', methods=['GET'])
 @jwt_required()
 @rate_limit(60)
