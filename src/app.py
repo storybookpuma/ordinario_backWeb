@@ -307,7 +307,7 @@ CONTENT_TYPE_MAP = {
     'gif': 'image/gif',
 }
 
-BUCKET_PROFILE_PICTURES = "profile-pictures"
+BUCKET_PROFILE_PICTURES = os.getenv("SUPABASE_BUCKET_PROFILE_PICTURES", "profile-pictures")
 
 
 @app.route('/update_profile_picture', methods=['POST'])
@@ -343,6 +343,17 @@ def update_profile_picture():
 
         user = users_repository.find_by_email(user_email)
         if user:
+            old_picture_url = user.get('profile_picture')
+            if old_picture_url and BUCKET_PROFILE_PICTURES in old_picture_url:
+                try:
+                    # Extract path after bucket name from public URL
+                    # URL format: .../storage/v1/object/public/{bucket}/{path}
+                    old_path = old_picture_url.split(f"/public/{BUCKET_PROFILE_PICTURES}/", 1)[-1]
+                    if old_path and old_path != old_picture_url:
+                        supabase.delete_storage(BUCKET_PROFILE_PICTURES, old_path)
+                except Exception:
+                    logger.exception("Error al eliminar imagen anterior de Storage")
+
             users_repository.update_by_email(
                 user_email,
                 {'$set': {'profile_picture': public_url}}

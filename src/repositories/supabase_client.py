@@ -75,12 +75,26 @@ class SupabaseRestClient:
                 "apikey": self.headers["apikey"],
                 "Authorization": self.headers["Authorization"],
                 "Content-Type": content_type,
+                "x-upsert": "true",
             },
             data=file_bytes,
             timeout=30,
         )
         response.raise_for_status()
         return response.json()
+
+    def delete_storage(self, bucket, path):
+        storage_url = f"{self.base_url.replace('/rest/v1', '')}/storage/v1/object/{bucket}/{path}"
+        response = requests.delete(
+            storage_url,
+            headers={
+                "apikey": self.headers["apikey"],
+                "Authorization": self.headers["Authorization"],
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.text
 
     def public_storage_url(self, bucket, path):
         base = self.base_url.replace("/rest/v1", "")
