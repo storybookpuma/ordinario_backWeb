@@ -27,6 +27,19 @@ class RatingsRepository:
             'timestamp': datetime.utcnow(),
         })
 
+    def update_rating(self, entity_type, entity_id, user_id, rating):
+        return self.collection.update_one(
+            {'entityType': entity_type, 'entityId': entity_id, 'userId': user_id},
+            {'$set': {'rating': rating, 'timestamp': datetime.utcnow()}}
+        )
+
+    def delete_rating(self, entity_type, entity_id, user_id):
+        return self.collection.delete_one({
+            'entityType': entity_type,
+            'entityId': entity_id,
+            'userId': user_id,
+        })
+
     def summarize_entity(self, entity_type, entity_id):
         pipeline = [
             {'$match': {'entityType': entity_type, 'entityId': entity_id}},
@@ -44,3 +57,17 @@ class RatingsRepository:
             'averageRating': result[0]['averageRating'],
             'ratingCount': result[0]['ratingCount'],
         }
+
+    def top_rated(self, entity_type, limit=20):
+        pipeline = [
+            {'$match': {'entityType': entity_type}},
+            {'$group': {
+                '_id': '$entityId',
+                'averageRating': {'$avg': '$rating'},
+                'ratingCount': {'$sum': 1},
+            }},
+            {'$match': {'ratingCount': {'$gte': 1}}},
+            {'$sort': {'averageRating': -1, 'ratingCount': -1}},
+            {'$limit': limit},
+        ]
+        return list(self.collection.aggregate(pipeline))

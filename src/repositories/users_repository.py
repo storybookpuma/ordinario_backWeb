@@ -12,14 +12,11 @@ class UsersRepository:
     def find_by_username(self, username):
         return self.collection.find_one({'username': username})
 
-    def search_profiles(self, query, limit):
+    def search_profiles(self, query, limit, offset=0):
         regex_query = {'$regex': query, '$options': 'i'}
         return self.collection.find({
-            '$or': [
-                {'username': regex_query},
-                {'email': regex_query},
-            ]
-        }).limit(limit)
+            'username': regex_query,
+        }).skip(offset).limit(limit)
 
     def find_by_id(self, user_id):
         try:

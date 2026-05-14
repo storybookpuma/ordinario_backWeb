@@ -35,9 +35,19 @@ def _resolve_entity(entity_type, entity_id, current_user_email):
     access_token = get_valid_spotify_token(current_user_email, repos.users)
     if not access_token:
         raise PermissionError("spotify_auth_required")
-    sp = spotipy.Spotify(auth=access_token)
+    sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
     if not verify_entity_exists(entity_type, entity_id, sp):
         return None
+    return entity_id
+
+
+def _resolve_entity_read(entity_type, entity_id):
+    repos = _get_repos()
+    if entity_type == "profile":
+        entity_obj_id = repos.users.get_profile_entity_id(entity_id)
+        if not entity_obj_id:
+            return None
+        return entity_obj_id
     return entity_id
 
 
@@ -139,10 +149,7 @@ def get_comments(entity_type, entity_id):
         validate_entity_type(entity_type)
         repos = _get_repos()
 
-        try:
-            entity_obj_id = _resolve_entity(entity_type, entity_id, get_jwt_identity())
-        except PermissionError:
-            return jsonify({"message": "Por favor, inicia sesión en Spotify."}), 401
+        entity_obj_id = _resolve_entity_read(entity_type, entity_id)
         if entity_obj_id is None:
             current_app.logger.warning(f"ID de entidad inválido: {entity_id}")
             return jsonify({"message": "ID de entidad inválido."}), 400

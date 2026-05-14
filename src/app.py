@@ -16,6 +16,7 @@ from .spotify_integration import create_spotify_oauth, get_valid_spotify_token, 
 from .config import Config
 from .repositories.factory import create_repositories
 from .utils.api import json_error, internal_error, get_json_body, get_string_field, get_int_arg, validate_entity_type, rate_limit
+from .utils.cache import TimedCache
 from .serializers import serialize_current_user, serialize_public_profile, serialize_comment, serialize_public_comment
 from werkzeug.utils import secure_filename
 from flask_cors import CORS
@@ -84,9 +85,10 @@ comments_repository = repositories.comments
 favorites_repository = repositories.favorites
 ratings_repository = repositories.ratings
 
-# Exponer repositorios a blueprints vía extensions
+# Exponer repositorios y cache a blueprints vía extensions
 app.extensions = getattr(app, "extensions", {})
 app.extensions["repositories"] = repositories
+app.extensions["cache"] = TimedCache(default_ttl=300)
 
 jwt = JWTManager(app)
 if app.config["CORS_ORIGINS"]:
@@ -383,18 +385,23 @@ def get_current_user():
 @jwt_required()
 @rate_limit(120)
 def search_song():
-    current_user = get_jwt_identity()
-    access_token = get_valid_spotify_token(current_user, users_repository)
-    if not access_token:
-        return jsonify({"message": "Por favor, inicia sesión en Spotify para buscar canciones."}), 401
-
     query = request.args.get('q', '').strip()
     limit = get_int_arg('limit', 10, minimum=1, maximum=25)
     if not query:
         return jsonify({"message": "Se requiere un parámetro de búsqueda (q)"}), 400
 
+    cache_key = f"search:song:{query}:{limit}"
+    cached = app.extensions["cache"].get(cache_key)
+    if cached is not None:
+        return jsonify({"tracks": cached}), 200
+
+    current_user = get_jwt_identity()
+    access_token = get_valid_spotify_token(current_user, users_repository)
+    if not access_token:
+        return jsonify({"message": "Por favor, inicia sesión en Spotify para buscar canciones."}), 401
+
     try:
-        sp = spotipy.Spotify(auth=access_token)
+        sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
         results = sp.search(q=query, type='track', limit=limit)
         tracks = []
         for item in results['tracks']['items']:
@@ -409,6 +416,7 @@ def search_song():
             }
             tracks.append(track_info)
 
+        app.extensions["cache"].set(cache_key, tracks, ttl=300)
         return jsonify({"tracks": tracks}), 200
 
     except Exception as e:
@@ -421,18 +429,23 @@ def search_song():
 @rate_limit(120)
 def search_album():
     try:
-        current_user = get_jwt_identity()
-        access_token = get_valid_spotify_token(current_user, users_repository)
-        if not access_token:
-            return jsonify({"message": "Por favor, inicia sesión en Spotify para buscar álbumes."}), 401
-
         query = request.args.get('q', '').strip()
         limit = get_int_arg('limit', 10, minimum=1, maximum=25)
 
         if not query:
             return jsonify({"message": "Se requiere un parámetro de búsqueda (q)"}), 400
 
-        sp = spotipy.Spotify(auth=access_token)
+        cache_key = f"search:album:{query}:{limit}"
+        cached = app.extensions["cache"].get(cache_key)
+        if cached is not None:
+            return jsonify({"albums": cached}), 200
+
+        current_user = get_jwt_identity()
+        access_token = get_valid_spotify_token(current_user, users_repository)
+        if not access_token:
+            return jsonify({"message": "Por favor, inicia sesión en Spotify para buscar álbumes."}), 401
+
+        sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
         results = sp.search(q=query, type='album', limit=limit)
         albums = []
         for item in results['albums']['items']:
@@ -447,6 +460,7 @@ def search_album():
             }
             albums.append(album_info)
 
+        app.extensions["cache"].set(cache_key, albums, ttl=300)
         return jsonify({"albums": albums}), 200
 
     except ValidationError as e:
@@ -460,18 +474,23 @@ def search_album():
 @jwt_required()
 @rate_limit(120)
 def search_artist():
-    current_user = get_jwt_identity()
-    access_token = get_valid_spotify_token(current_user, users_repository)
-    if not access_token:
-        return jsonify({"message": "Por favor, inicia sesión en Spotify para buscar artistas."}), 401
-
     query = request.args.get('q', '').strip()
     limit = get_int_arg('limit', 10, minimum=1, maximum=25)
     if not query:
         return jsonify({"message": "Se requiere un parámetro de búsqueda (q)"}), 400
 
+    cache_key = f"search:artist:{query}:{limit}"
+    cached = app.extensions["cache"].get(cache_key)
+    if cached is not None:
+        return jsonify({"artists": cached}), 200
+
+    current_user = get_jwt_identity()
+    access_token = get_valid_spotify_token(current_user, users_repository)
+    if not access_token:
+        return jsonify({"message": "Por favor, inicia sesión en Spotify para buscar artistas."}), 401
+
     try:
-        sp = spotipy.Spotify(auth=access_token)
+        sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
         results = sp.search(q=query, type='artist', limit=limit)
         artists = []
         for item in results['artists']['items']:
@@ -486,6 +505,7 @@ def search_artist():
             }
             artists.append(artist_info)
 
+        app.extensions["cache"].set(cache_key, artists, ttl=300)
         return jsonify({"artists": artists}), 200
 
     except Exception as e:
@@ -495,19 +515,25 @@ def search_artist():
 
 @app.route('/search_playlist', methods=['GET'])
 @jwt_required()
+@rate_limit(120)
 def search_playlist():
+    query = request.args.get('q', '').strip()
+    limit = get_int_arg('limit', 10, minimum=1, maximum=25)
+    if not query:
+        return jsonify({"message": "Se requiere un parámetro de búsqueda (q)"}), 400
+
+    cache_key = f"search:playlist:{query}:{limit}"
+    cached = app.extensions["cache"].get(cache_key)
+    if cached is not None:
+        return jsonify({"playlists": cached}), 200
+
     current_user = get_jwt_identity()
     access_token = get_valid_spotify_token(current_user, users_repository)
     if not access_token:
         return jsonify({"message": "Por favor, inicia sesión en Spotify para buscar playlists."}), 401
 
-    query = request.args.get('q')
-    limit = int(request.args.get('limit', 10))
-    if not query:
-        return jsonify({"message": "Se requiere un parámetro de búsqueda (q)"}), 400
-
     try:
-        sp = spotipy.Spotify(auth=access_token)
+        sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
         results = sp.search(q=query, type='playlist', limit=limit)
         playlists = []
         for item in results['playlists']['items']:
@@ -521,24 +547,28 @@ def search_playlist():
             }
             playlists.append(playlist_info)
 
+        app.extensions["cache"].set(cache_key, playlists, ttl=300)
         return jsonify({"playlists": playlists}), 200
 
     except Exception as e:
-        return jsonify({"message": f"Error al buscar las playlists: {str(e)}"}), 500
+        logger.exception("Error al buscar playlist")
+        return jsonify({"message": "Error al buscar las playlists."}), 500
     
 
 @app.route('/search_profile', methods=['GET'])
 @jwt_required()
+@rate_limit(60)
 def search_profile():
     query = request.args.get('q', '').strip()
     limit = get_int_arg('limit', 10, minimum=1, maximum=25)
+    offset = get_int_arg('offset', 0, minimum=0)
     if not query:
         return jsonify({"message": "Se requiere un parámetro de búsqueda (q)"}), 400
     if len(query) > 80:
         return json_error("La búsqueda es demasiado larga.", 400, code="invalid_query")
 
     try:
-        users = users_repository.search_profiles(query, limit)
+        users = users_repository.search_profiles(query, limit, offset)
         profiles = [serialize_public_profile(user) for user in users]
 
         return jsonify({"profiles": profiles}), 200
@@ -552,150 +582,139 @@ def search_profile():
 
 @app.route('/top_albums_global', methods=['GET'])
 @jwt_required()
+@rate_limit(120)
 def top_albums_global():
-    current_user = get_jwt_identity()
+    limit = get_int_arg('limit', 20, minimum=1, maximum=50)
+    offset = get_int_arg('offset', 0, minimum=0)
 
+    cache_key = f"top:albums:{limit}:{offset}"
+    cached = app.extensions["cache"].get(cache_key)
+    if cached is not None:
+        return jsonify({"albums": cached}), 200
+
+    current_user = get_jwt_identity()
     access_token = get_valid_spotify_token(current_user, users_repository)
     if not access_token:
         logger.error("Token de acceso no disponible para /top_albums_global.")
         return jsonify({"message": "Por favor, inicia sesión en Spotify para ver los álbumes top."}), 401
 
-    # Obtener parámetros de paginación
     try:
-        limit = int(request.args.get('limit', 20))
-        offset = int(request.args.get('offset', 0))
-        if limit > 50:
-            limit = 50  # Spotify API tiene un límite máximo de 50 por solicitud
-    except ValueError:
-        logger.warning("Parámetros de paginación inválidos en /top_albums_global.")
-        return jsonify({"message": "Los parámetros 'limit' y 'offset' deben ser números enteros."}), 400
+        sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
+        new_releases = sp.new_releases(limit=limit, offset=offset, country='US')
 
-    try:
-        sp = spotipy.Spotify(auth=access_token)
+        albums = []
+        for album in new_releases['albums']['items']:
+            album_info = {
+                "id": album['id'],
+                "name": album['name'],
+                "artists": [artist['name'] for artist in album['artists']],
+                "url": album['external_urls']['spotify'],
+                "cover_image": album['images'][0]['url'] if album['images'] else None,
+                "type": album['album_type']
+            }
+            albums.append(album_info)
 
-        try:
-            new_releases = sp.new_releases(limit=limit, offset=offset, country='US')
+        app.extensions["cache"].set(cache_key, albums, ttl=600)
+        return jsonify({"albums": albums}), 200
 
-            albums = []
-            for album in new_releases['albums']['items']:
-                album_info = {
-                    "id": album['id'],
-                    "name": album['name'],
-                    "artists": [artist['name'] for artist in album['artists']],
-                    "url": album['external_urls']['spotify'],
-                    "cover_image": album['images'][0]['url'] if album['images'] else None,
-                    "type": album['album_type']
-                }
-                albums.append(album_info)
-
-            return jsonify({"albums": albums}), 200
-
-        except spotipy.exceptions.SpotifyException as e:
-            logger.error("SpotifyException en /top_albums_global: %s", e)
-            return jsonify({"message": f"Error con la API de Spotify: {e.msg}"}), e.http_status
-
+    except spotipy.exceptions.SpotifyException as e:
+        logger.error("SpotifyException en /top_albums_global: %s", e)
+        return jsonify({"message": f"Error con la API de Spotify: {e.msg}"}), e.http_status
     except Exception as e:
         logger.error("Error general en /top_albums_global: %s", e)
-        return jsonify({"message": f"Error interno: {str(e)}"}), 500
+        return internal_error("Error al obtener los álbumes top.")
 
 
 @app.route('/top_artists_global', methods=['GET'])
 @jwt_required()
+@rate_limit(120)
 def top_artists_global():
-    current_user = get_jwt_identity()
+    limit = get_int_arg('limit', 20, minimum=1, maximum=50)
+    offset = get_int_arg('offset', 0, minimum=0)
 
+    cache_key = f"top:artists:{limit}:{offset}"
+    cached = app.extensions["cache"].get(cache_key)
+    if cached is not None:
+        return jsonify({"artists": cached}), 200
+
+    current_user = get_jwt_identity()
     access_token = get_valid_spotify_token(current_user, users_repository)
     if not access_token:
         logger.error("Token de acceso no disponible para /top_artists_global.")
         return jsonify({"message": "Por favor, inicia sesión en Spotify para ver los artistas top."}), 401
 
     try:
-        limit = int(request.args.get('limit', 20))
-        offset = int(request.args.get('offset', 0))
-        if limit > 50:
-            limit = 50  
-    except ValueError:
-        logger.warning("Parámetros de paginación inválidos en /top_artists_global.")
-        return jsonify({"message": "Los parámetros 'limit' y 'offset' deben ser números enteros."}), 400
-
-    try:
-        # Instanciar el cliente de Spotify con un timeout aumentado
         sp = spotipy.Spotify(auth=access_token, requests_timeout=30)
+        new_releases = sp.new_releases(limit=50, country='US')
 
-        try:
-            # Obtener nuevos lanzamientos
-            new_releases = sp.new_releases(limit=50, country='US')  # Ajusta 'country' según tus necesidades
+        artists_dict = {}
+        for album in new_releases['albums']['items']:
+            for artist in album['artists']:
+                artist_id = artist['id']
+                if artist_id not in artists_dict:
+                    artists_dict[artist_id] = {
+                        "id": artist_id,
+                        "name": artist['name'],
+                        "image": None,
+                        "url": None,
+                        "popularity": 0
+                    }
 
-            # Extraer artistas únicos de los nuevos lanzamientos
-            artists_dict = {}
-            for album in new_releases['albums']['items']:
-                for artist in album['artists']:
-                    artist_id = artist['id']
-                    if artist_id not in artists_dict:
-                        artists_dict[artist_id] = {
-                            "id": artist_id,
-                            "name": artist['name'],
-                            "image": None,
-                            "url": None,
-                            "popularity": 0  
-                        }
+        artist_ids = list(artists_dict.keys())
+        for i in range(0, len(artist_ids), 50):
+            batch_ids = artist_ids[i:i + 50]
+            try:
+                artists_info = sp.artists(batch_ids)['artists']
+            except requests.exceptions.ReadTimeout:
+                logger.error("Timeout al obtener detalles de artistas.")
+                return jsonify({"message": "La solicitud a Spotify ha tardado demasiado. Por favor, intenta nuevamente más tarde."}), 504
+            except spotipy.exceptions.SpotifyException as e:
+                logger.error("SpotifyException en detalles de artistas: %s", e)
+                return jsonify({"message": f"Error con la API de Spotify: {e.msg}"}), e.http_status
 
-            # Obtener la información completa de los artistas
-            artist_ids = list(artists_dict.keys())
-            for i in range(0, len(artist_ids), 50):
-                batch_ids = artist_ids[i:i + 50]
-                try:
-                    artists_info = sp.artists(batch_ids)['artists']
-                except requests.exceptions.ReadTimeout:
-                    logger.error("Timeout al obtener detalles de artistas.")
-                    return jsonify({"message": "La solicitud a Spotify ha tardado demasiado. Por favor, intenta nuevamente más tarde."}), 504
-                except spotipy.exceptions.SpotifyException as e:
-                    logger.error("SpotifyException en detalles de artistas: %s", e)
-                    return jsonify({"message": f"Error con la API de Spotify: {e.msg}"}), e.http_status
+            for artist_info in artists_info:
+                if artist_info:
+                    artists_dict[artist_info['id']]['image'] = artist_info['images'][0]['url'] if artist_info['images'] else None
+                    artists_dict[artist_info['id']]['url'] = artist_info['external_urls']['spotify']
+                    artists_dict[artist_info['id']]['popularity'] = artist_info.get('popularity', 0)
 
-                for artist_info in artists_info:
-                    if artist_info:
-                        artists_dict[artist_info['id']]['image'] = artist_info['images'][0]['url'] if artist_info['images'] else None
-                        artists_dict[artist_info['id']]['url'] = artist_info['external_urls']['spotify']
-                        artists_dict[artist_info['id']]['popularity'] = artist_info.get('popularity', 0)
+        artists_list = list(artists_dict.values())
+        artists_sorted = sorted(artists_list, key=lambda x: x['popularity'], reverse=True)
+        paginated_artists = artists_sorted[offset:offset + limit]
 
-            artists_list = list(artists_dict.values())
+        response_artists = []
+        for artist in paginated_artists:
+            artist_info = {
+                "id": artist['id'],
+                "name": artist['name'],
+                "image": artist['image'],
+                "url": artist['url']
+            }
+            response_artists.append(artist_info)
 
-            # Ordenar los artistas por popularidad descendente
-            artists_sorted = sorted(artists_list, key=lambda x: x['popularity'], reverse=True)
+        app.extensions["cache"].set(cache_key, response_artists, ttl=600)
+        return jsonify({"artists": response_artists}), 200
 
-            paginated_artists = artists_sorted[offset:offset + limit]
-
-            response_artists = []
-            for artist in paginated_artists:
-                artist_info = {
-                    "id": artist['id'],
-                    "name": artist['name'],
-                    "image": artist['image'],
-                    "url": artist['url']
-                }
-                response_artists.append(artist_info)
-
-            return jsonify({"artists": response_artists}), 200
-
-        except requests.exceptions.ReadTimeout:
-            logger.error("Timeout al obtener nuevos lanzamientos de Spotify.")
-            return jsonify({"message": "La solicitud a Spotify ha tardado demasiado. Por favor, intenta nuevamente más tarde."}), 504
-        except spotipy.exceptions.SpotifyException as e:
-            logger.error("SpotifyException en /top_artists_global: %s", e)
-            return jsonify({"message": f"Error con la API de Spotify: {e.msg}"}), e.http_status
-
+    except requests.exceptions.ReadTimeout:
+        logger.error("Timeout al obtener nuevos lanzamientos de Spotify.")
+        return jsonify({"message": "La solicitud a Spotify ha tardado demasiado. Por favor, intenta nuevamente más tarde."}), 504
+    except spotipy.exceptions.SpotifyException as e:
+        logger.error("SpotifyException en /top_artists_global: %s", e)
+        return jsonify({"message": f"Error con la API de Spotify: {e.msg}"}), e.http_status
     except Exception as e:
         logger.error("Error general en /top_artists_global: %s", e)
-        return jsonify({"message": f"Error interno: {str(e)}"}), 500
-
-    return jsonify({"message": "Endpoint no encontrado."}), 404
+        return internal_error("Error al obtener los artistas top.")
 
 
 @app.route('/videos', methods=['GET'])
+@rate_limit(60)
 def get_videos():
-    youtube_url = "https://www.googleapis.com/youtube/v3/search"
+    cache_key = "videos:music"
+    cached = app.extensions["cache"].get(cache_key)
+    if cached is not None:
+        return jsonify({"videos": cached}), 200
 
+    youtube_url = "https://www.googleapis.com/youtube/v3/search"
     params = {
         "part": "snippet",
         "q": "music",
@@ -707,8 +726,8 @@ def get_videos():
     }
 
     try:
-        response = requests.get(youtube_url, params=params)
-        response.raise_for_status()  
+        response = requests.get(youtube_url, params=params, timeout=15)
+        response.raise_for_status()
 
         videos = response.json().get("items", [])
         formatted_videos = [
@@ -721,6 +740,7 @@ def get_videos():
             }
             for video in videos
         ]
+        app.extensions["cache"].set(cache_key, formatted_videos, ttl=600)
         return jsonify({"videos": formatted_videos}), 200
 
     except requests.exceptions.HTTPError as errh:
@@ -734,10 +754,16 @@ def get_videos():
 
 @app.route('/song_details', methods=['GET'])
 @jwt_required()
+@rate_limit(120)
 def song_details():
     song_id = request.args.get('song_id')
     if not song_id:
         return jsonify({"message": "Se requiere el ID de la canción."}), 400
+
+    cache_key = f"details:song:{song_id}"
+    cached = app.extensions["cache"].get(cache_key)
+    if cached is not None:
+        return jsonify({'song': cached}), 200
 
     current_user_email = get_jwt_identity()
     access_token = get_valid_spotify_token(current_user_email, users_repository)
@@ -745,7 +771,7 @@ def song_details():
         return jsonify({"message": "Por favor, inicia sesión en Spotify."}), 401
 
     try:
-        sp = spotipy.Spotify(auth=access_token)
+        sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
         track = sp.track(song_id)
 
         song_info = {
@@ -775,28 +801,31 @@ def song_details():
         song_info['followers'] = followers
 
         rating_summary = ratings_repository.summarize_entity('song', song_id)
-        average_rating = rating_summary['averageRating']
-        rating_count = rating_summary['ratingCount']
+        song_info['averageRating'] = rating_summary['averageRating']
+        song_info['ratingCount'] = rating_summary['ratingCount']
 
-        song_info['averageRating'] = average_rating
-        song_info['ratingCount'] = rating_count
-
-        logger.info(f"Detalles de la canción {song_id} con averageRating={average_rating} y ratingCount={rating_count}")
-
+        app.extensions["cache"].set(cache_key, song_info, ttl=600)
         return jsonify({'song': song_info}), 200
 
     except spotipy.exceptions.SpotifyException as e:
         return jsonify({"message": f"Error con la API de Spotify: {e.msg}"}), e.http_status
     except Exception as e:
-        return jsonify({"message": f"Error al obtener los detalles de la canción: {str(e)}"}), 500
+        logger.exception("Error al obtener detalles de canción")
+        return internal_error("Error al obtener los detalles de la canción.")
 
 
 @app.route('/album_details', methods=['GET'])
 @jwt_required()
+@rate_limit(120)
 def album_details():
     album_id = request.args.get('album_id')
     if not album_id:
         return jsonify({"message": "Se requiere el ID del álbum."}), 400
+
+    cache_key = f"details:album:{album_id}"
+    cached = app.extensions["cache"].get(cache_key)
+    if cached is not None:
+        return jsonify({'album': cached}), 200
 
     current_user_email = get_jwt_identity()
     access_token = get_valid_spotify_token(current_user_email, users_repository)
@@ -804,14 +833,14 @@ def album_details():
         return jsonify({"message": "Por favor, inicia sesión en Spotify."}), 401
 
     try:
-        sp = spotipy.Spotify(auth=access_token)
+        sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
         album = sp.album(album_id)
 
         album_info = {
             "id": album['id'],
             "name": album['name'],
             "artists": [artist['name'] for artist in album['artists']],
-            "artist_ids": [artist['id'] for artist in album['artists']],  
+            "artist_ids": [artist['id'] for artist in album['artists']],
             "cover_image": album['images'][0]['url'] if album['images'] else None,
             "release_date": album['release_date'],
             "total_tracks": album['total_tracks'],
@@ -828,33 +857,36 @@ def album_details():
                 "url": track['external_urls']['spotify'],
                 "track_number": track['track_number'],
                 "artists": [artist['name'] for artist in track['artists']],
-                "artist_ids": [artist['id'] for artist in track['artists']], 
+                "artist_ids": [artist['id'] for artist in track['artists']],
             }
             album_info['tracks'].append(track_info)
 
         rating_summary = ratings_repository.summarize_entity('album', album_id)
-        average_rating = rating_summary['averageRating']
-        rating_count = rating_summary['ratingCount']
+        album_info['averageRating'] = rating_summary['averageRating']
+        album_info['ratingCount'] = rating_summary['ratingCount']
 
-        album_info['averageRating'] = average_rating
-        album_info['ratingCount'] = rating_count
-
-        logger.info(f"Detalles del álbum {album_id} con averageRating={average_rating} y ratingCount={rating_count}")
-
+        app.extensions["cache"].set(cache_key, album_info, ttl=600)
         return jsonify({'album': album_info}), 200
 
     except spotipy.exceptions.SpotifyException as e:
         return jsonify({"message": f"Error con la API de Spotify: {e.msg}"}), e.http_status
     except Exception as e:
-        return jsonify({"message": f"Error al obtener los detalles del álbum: {str(e)}"}), 500
+        logger.exception("Error al obtener detalles de álbum")
+        return internal_error("Error al obtener los detalles del álbum.")
 
 
 @app.route('/artist_details', methods=['GET'])
 @jwt_required()
+@rate_limit(120)
 def artist_details():
     artist_id = request.args.get('artist_id')
     if not artist_id:
         return jsonify({"message": "Se requiere el ID del artista."}), 400
+
+    cache_key = f"details:artist:{artist_id}"
+    cached = app.extensions["cache"].get(cache_key)
+    if cached is not None:
+        return jsonify({'artist': cached['artist'], 'albums': cached['albums']}), 200
 
     current_user_email = get_jwt_identity()
     access_token = get_valid_spotify_token(current_user_email, users_repository)
@@ -862,7 +894,7 @@ def artist_details():
         return jsonify({"message": "Por favor, inicia sesión en Spotify."}), 401
 
     try:
-        sp = spotipy.Spotify(auth=access_token)
+        sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
         artist = sp.artist(artist_id)
         albums = sp.artist_albums(artist_id, album_type='album')['items']
 
@@ -885,20 +917,17 @@ def artist_details():
             })
 
         rating_summary = ratings_repository.summarize_entity('artist', artist_id)
-        average_rating = rating_summary['averageRating']
-        rating_count = rating_summary['ratingCount']
+        artist_info['averageRating'] = rating_summary['averageRating']
+        artist_info['ratingCount'] = rating_summary['ratingCount']
 
-        artist_info['averageRating'] = average_rating
-        artist_info['ratingCount'] = rating_count
-
-        logger.info(f"Detalles del artista {artist_id} con averageRating={average_rating} y ratingCount={rating_count}")
-
+        app.extensions["cache"].set(cache_key, {'artist': artist_info, 'albums': albums_info}, ttl=600)
         return jsonify({'artist': artist_info, 'albums': albums_info}), 200
 
     except spotipy.exceptions.SpotifyException as e:
         return jsonify({"message": f"Error con la API de Spotify: {e.msg}"}), e.http_status
     except Exception as e:
-        return jsonify({"message": f"Error al obtener los detalles del artista: {str(e)}"}), 500
+        logger.exception("Error al obtener detalles de artista")
+        return internal_error("Error al obtener los detalles del artista.")
     
 
 @app.route('/profile_details', methods=['GET'])
@@ -925,23 +954,26 @@ def get_profile_details():
 
 @app.route('/album_tracks', methods=['GET'])
 @jwt_required()
+@rate_limit(120)
 def get_album_tracks():
     album_id = request.args.get('album_id')
     if not album_id:
         return jsonify({"message": "Se requiere el ID del álbum."}), 400
 
-    current_user = get_jwt_identity()
+    cache_key = f"tracks:album:{album_id}"
+    cached = app.extensions["cache"].get(cache_key)
+    if cached is not None:
+        return jsonify({"tracks": cached}), 200
 
+    current_user = get_jwt_identity()
     access_token = get_valid_spotify_token(current_user, users_repository)
     if not access_token:
         return jsonify({"message": "Por favor, inicia sesión en Spotify para ver las canciones del álbum."}), 401
 
     try:
-        sp = spotipy.Spotify(auth=access_token)
-
+        sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
         album_tracks_results = sp.album_tracks(album_id)
-        
-        # Formatear las canciones del álbum
+
         tracks = []
         for item in album_tracks_results['items']:
             track_info = {
@@ -953,10 +985,12 @@ def get_album_tracks():
             }
             tracks.append(track_info)
 
+        app.extensions["cache"].set(cache_key, tracks, ttl=600)
         return jsonify({"tracks": tracks}), 200
 
     except Exception as e:
-        return jsonify({"message": f"Error al obtener las canciones del álbum: {str(e)}"}), 500
+        logger.exception("Error al obtener canciones del álbum")
+        return internal_error("Error al obtener las canciones del álbum.")
 
 
 # Comments, favorites, ratings, and social routes have been moved to blueprints.
@@ -965,29 +999,156 @@ def get_album_tracks():
 
 @app.route('/recently_listened', methods=['GET'])
 @jwt_required()
+@rate_limit(60)
 def recently_listened():
     user_email = get_jwt_identity()
+    cache_key = f"recently_listened:{user_email}"
+    cached = app.extensions["cache"].get(cache_key)
+    if cached is not None:
+        return jsonify({'songs': cached}), 200
+
     access_token = get_valid_spotify_token(user_email, users_repository)
     if not access_token:
         return jsonify({'error': 'Por favor, inicia sesión en Spotify.'}), 401
 
-    sp = spotipy.Spotify(auth=access_token)
     try:
+        sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
         recently_played = sp.current_user_recently_played(limit=10)
-        songs = []  
+        songs = []
         for item in recently_played['items']:
             track = item['track']
             songs.append({
-                'id': track['id'],  
+                'id': track['id'],
                 'name': track['name'],
                 'artist': ', '.join([artist['name'] for artist in track['artists']]),
                 'album': track['album']['name'],
                 'cover_image': track['album']['images'][0]['url'] if track['album']['images'] else None,
                 'url': track['external_urls']['spotify'],
             })
+        app.extensions["cache"].set(cache_key, songs, ttl=300)
         return jsonify({'songs': songs}), 200
     except Exception as e:
-        return jsonify({'error': f'Error al obtener canciones reproducidas recientemente: {str(e)}'}), 500
+        logger.exception("Error al obtener recently listened")
+        return jsonify({'error': 'Error al obtener canciones reproducidas recientemente.'}), 500
+
+
+@app.route('/charts/top_rated', methods=['GET'])
+@jwt_required()
+@rate_limit(60)
+def top_rated_charts():
+    entity_type = request.args.get('entityType', '').strip()
+    limit = get_int_arg('limit', 20, minimum=1, maximum=50)
+
+    if entity_type not in ('song', 'album', 'artist'):
+        return json_error("Tipo de entidad inválido.", 400, code="invalid_entity_type")
+
+    cache_key = f"charts:top_rated:{entity_type}:{limit}"
+    cached = app.extensions["cache"].get(cache_key)
+    if cached is not None:
+        return jsonify({"entityType": entity_type, "items": cached}), 200
+
+    try:
+        top_items = ratings_repository.top_rated(entity_type, limit)
+        results = []
+        for item in top_items:
+            results.append({
+                "entityId": item["_id"],
+                "averageRating": round(item["averageRating"], 2) if item["averageRating"] else 0,
+                "ratingCount": item["ratingCount"],
+            })
+
+        app.extensions["cache"].set(cache_key, results, ttl=600)
+        return jsonify({"entityType": entity_type, "items": results}), 200
+
+    except Exception as e:
+        logger.exception("Error al obtener charts")
+        return internal_error("Error al obtener los charts.")
+
+
+@app.route('/activity', methods=['GET'])
+@jwt_required()
+@rate_limit(60)
+def activity_feed():
+    limit = get_int_arg('limit', 20, minimum=1, maximum=50)
+
+    cache_key = f"activity:global:{limit}"
+    cached = app.extensions["cache"].get(cache_key)
+    if cached is not None:
+        return jsonify({"activities": cached}), 200
+
+    try:
+        activities = []
+
+        if app.config["DATABASE_PROVIDER"] == "mongo":
+            recent_comments = comments_repository.collection.find().sort('timestamp', -1).limit(limit)
+            for c in recent_comments:
+                activities.append({
+                    "type": "comment",
+                    "entityType": c.get("entity_type"),
+                    "entityId": str(c.get("entity_id")),
+                    "username": c.get("username"),
+                    "text": c.get("comment_text"),
+                    "timestamp": c.get("timestamp").isoformat() if c.get("timestamp") else None,
+                })
+
+            recent_ratings = ratings_repository.collection.find().sort('timestamp', -1).limit(limit)
+            for r in recent_ratings:
+                user = users_repository.find_by_id(r.get("userId"))
+                activities.append({
+                    "type": "rating",
+                    "entityType": r.get("entityType"),
+                    "entityId": r.get("entityId"),
+                    "username": user.get("username") if user else "Usuario",
+                    "rating": r.get("rating"),
+                    "timestamp": r.get("timestamp").isoformat() if r.get("timestamp") else None,
+                })
+        else:
+            # Supabase path: fetch recent items from each table
+            comment_rows = repositories.comments.client.select("comments", limit=limit, order="created_at.desc")
+            for row in comment_rows:
+                user = users_repository.find_by_id(row.get("user_id"))
+                activities.append({
+                    "type": "comment",
+                    "entityType": row.get("entity_type"),
+                    "entityId": row.get("entity_id"),
+                    "username": user.get("username") if user else "Usuario",
+                    "text": row.get("comment_text"),
+                    "timestamp": row.get("created_at"),
+                })
+
+            rating_rows = repositories.ratings.client.select("ratings", limit=limit, order="created_at.desc")
+            for row in rating_rows:
+                user = users_repository.find_by_id(row.get("user_id"))
+                activities.append({
+                    "type": "rating",
+                    "entityType": row.get("entity_type"),
+                    "entityId": row.get("entity_id"),
+                    "username": user.get("username") if user else "Usuario",
+                    "rating": row.get("rating"),
+                    "timestamp": row.get("created_at"),
+                })
+
+            favorite_rows = repositories.favorites.client.select("favorites", limit=limit, order="created_at.desc")
+            for row in favorite_rows:
+                user = users_repository.find_by_id(row.get("user_id"))
+                activities.append({
+                    "type": "favorite",
+                    "entityType": row.get("entity_type"),
+                    "entityId": row.get("entity_id"),
+                    "username": user.get("username") if user else "Usuario",
+                    "name": row.get("name"),
+                    "timestamp": row.get("created_at"),
+                })
+
+        activities.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
+        activities = activities[:limit]
+
+        app.extensions["cache"].set(cache_key, activities, ttl=300)
+        return jsonify({"activities": activities}), 200
+
+    except Exception as e:
+        logger.exception("Error al obtener activity feed")
+        return internal_error("Error al obtener el feed de actividad.")
 
 
 # Ratings and social routes have been moved to blueprints.

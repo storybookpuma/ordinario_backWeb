@@ -78,7 +78,15 @@ class SupabaseRestClient:
         return response.json()
 
     def _eq_filters(self, filters):
-        return {key: f"eq.{value}" for key, value in filters.items()}
+        result = {}
+        for key, value in filters.items():
+            if key.endswith("_ilike"):
+                result[key.replace("_ilike", "")] = f"ilike.{value}"
+            elif key.endswith("_in"):
+                result[key.replace("_in", "")] = f"in.({value})"
+            else:
+                result[key] = f"eq.{value}"
+        return result
 
 
 def create_supabase_client(app):

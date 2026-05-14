@@ -17,16 +17,15 @@ class SupabaseUsersRepository:
     def get_profile_entity_id(self, user_id):
         return str(user_id) if self.find_by_id(user_id) else None
 
-    def search_profiles(self, query, limit):
-        # PostgREST full ilike/or filtering will be added before enabling Supabase provider.
-        users = self.client.select(self.table, limit=limit)
-        normalized_query = query.lower()
-        return [
-            self._to_app_user(user)
-            for user in users
-            if normalized_query in user.get("username", "").lower()
-            or normalized_query in user.get("email", "").lower()
-        ]
+    def search_profiles(self, query, limit, offset=0):
+        users = self.client.select(
+            self.table,
+            username_ilike=f"%{query}%",
+            limit=limit,
+            offset=offset,
+            order="username.asc",
+        )
+        return [self._to_app_user(user) for user in users]
 
     def create(self, user):
         payload = {

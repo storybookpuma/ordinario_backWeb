@@ -23,6 +23,21 @@ class SupabaseRatingsRepository:
             "rating": rating,
         })
 
+    def update_rating(self, entity_type, entity_id, user_id, rating):
+        return self.client.update(
+            self.table,
+            {"entity_type": entity_type, "entity_id": entity_id, "user_id": str(user_id)},
+            {"rating": rating},
+        )
+
+    def delete_rating(self, entity_type, entity_id, user_id):
+        return self.client.delete(
+            self.table,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            user_id=str(user_id),
+        )
+
     def summarize_entity(self, entity_type, entity_id):
         rows = self.client.select(self.table, entity_type=entity_type, entity_id=entity_id)
         if not rows:
@@ -33,6 +48,28 @@ class SupabaseRatingsRepository:
             "averageRating": sum(ratings) / len(ratings),
             "ratingCount": len(ratings),
         }
+
+    def top_rated(self, entity_type, limit=20):
+        rows = self.client.select(self.table, entity_type=entity_type, limit=1000)
+        grouped = {}
+        for row in rows:
+            eid = row["entity_id"]
+            if eid not in grouped:
+                grouped[eid] = {"ratings": [], "count": 0}
+            grouped[eid]["ratings"].append(row["rating"])
+            grouped[eid]["count"] += 1
+
+        results = []
+        for eid, data in grouped.items():
+            avg = sum(data["ratings"]) / len(data["ratings"])
+            results.append({
+                "_id": eid,
+                "averageRating": avg,
+                "ratingCount": data["count"],
+            })
+
+        results.sort(key=lambda x: (-x["averageRating"], -x["ratingCount"]))
+        return results[:limit]
 
     def _to_app_rating(self, rating):
         if not rating:
