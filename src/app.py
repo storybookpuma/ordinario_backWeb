@@ -6,10 +6,8 @@ from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity
 from marshmallow import Schema, fields, ValidationError
 from dotenv import load_dotenv
 from urllib.parse import urlencode
-from functools import wraps
 import base64
 import json
-import time
 import uuid
 
 load_dotenv()
@@ -17,17 +15,14 @@ load_dotenv()
 from .spotify_integration import create_spotify_oauth, get_valid_spotify_token, verify_entity_exists
 from .config import Config
 from .repositories.factory import create_repositories
+from .utils.api import json_error, internal_error, get_json_body, get_string_field, get_int_arg, validate_entity_type, rate_limit
+from .serializers import serialize_current_user, serialize_public_profile, serialize_comment, serialize_public_comment
 from werkzeug.utils import secure_filename
 from flask_cors import CORS
 import spotipy
 import requests
 import os
 import logging
-
-
-VALID_ENTITY_TYPES = {'profile', 'song', 'album', 'artist'}
-RATE_LIMIT_BUCKETS = {}
-RATE_LIMIT_WINDOW_SECONDS = 60
 
 app = Flask(__name__)
 
@@ -38,77 +33,6 @@ app.secret_key = app.config["SECRET_KEY"]
 # Configurar logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-def json_error(message, status_code=400, *, code=None):
-    payload = {
-        "message": message,
-        "request_id": getattr(g, "request_id", None),
-    }
-    if code:
-        payload["code"] = code
-    return jsonify(payload), status_code
-
-
-def internal_error(message="Error interno del servidor."):
-    return json_error(message, 500, code="internal_error")
-
-
-def get_json_body():
-    data = request.get_json(silent=True)
-    return data if isinstance(data, dict) else {}
-
-
-def get_string_field(data, field, *, required=True, max_length=None):
-    value = data.get(field, "")
-    if not isinstance(value, str):
-        raise ValidationError({field: ["Debe ser texto."]})
-
-    value = value.strip()
-    if required and not value:
-        raise ValidationError({field: ["Este campo es obligatorio."]})
-    if max_length and len(value) > max_length:
-        raise ValidationError({field: [f"Debe tener máximo {max_length} caracteres."]})
-    return value
-
-
-def get_int_arg(name, default, *, minimum=0, maximum=None):
-    raw_value = request.args.get(name, default)
-    try:
-        value = int(raw_value)
-    except (TypeError, ValueError) as exc:
-        raise ValidationError({name: ["Debe ser un número entero."]}) from exc
-
-    if value < minimum:
-        raise ValidationError({name: [f"Debe ser mayor o igual a {minimum}."]})
-    if maximum is not None and value > maximum:
-        return maximum
-    return value
-
-
-def validate_entity_type(entity_type):
-    if entity_type not in VALID_ENTITY_TYPES:
-        raise ValidationError({"entity_type": [f"Debe ser uno de {sorted(VALID_ENTITY_TYPES)}."]})
-
-
-def rate_limit(limit, window_seconds=RATE_LIMIT_WINDOW_SECONDS):
-    def decorator(fn):
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            identifier = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
-            key = (fn.__name__, identifier)
-            now = time.time()
-            bucket = [timestamp for timestamp in RATE_LIMIT_BUCKETS.get(key, []) if now - timestamp < window_seconds]
-
-            if len(bucket) >= limit:
-                RATE_LIMIT_BUCKETS[key] = bucket
-                return json_error("Demasiadas solicitudes. Intenta de nuevo en unos segundos.", 429, code="rate_limited")
-
-            bucket.append(now)
-            RATE_LIMIT_BUCKETS[key] = bucket
-            return fn(*args, **kwargs)
-        return wrapper
-    return decorator
 
 
 def get_spotify_redirect_uri():
@@ -145,38 +69,6 @@ def build_frontend_redirect_url(return_url, token):
     return f"{base_url}{separator}{urlencode({'token': token})}"
 
 
-def serialize_current_user(user):
-    user_id = user.get('_id') or user.get('id')
-    return {
-        "id": str(user_id) if user_id is not None else "",
-        "username": user.get('username'),
-        "email": user.get('email'),
-        "profile_picture": user.get('profile_picture', ""),
-        "favorites": user.get('favorites', []),
-        "followers": user.get('followers', []),
-        "following": user.get('following', []),
-        "trivia_scores": user.get('trivia_scores', []),
-    }
-
-
-def serialize_public_profile(user, *, include_favorites=False):
-    user_id = user.get('_id') or user.get('id')
-    profile = {
-        "id": str(user_id) if user_id is not None else "",
-        "username": user.get('username', ''),
-        "profile_picture": user.get('profile_picture', ''),
-    }
-    if include_favorites:
-        profile["favorites"] = user.get('favorites', [])
-    return profile
-
-
-def serialize_public_comment(comment, entity_type):
-    serialized = serialize_comment(comment, entity_type)
-    serialized.pop('user_email', None)
-    return serialized
-
-
 def create_session_token(email):
     return create_access_token(identity=email, expires_delta=timedelta(days=30))
 
@@ -191,6 +83,11 @@ users_repository = repositories.users
 comments_repository = repositories.comments
 favorites_repository = repositories.favorites
 ratings_repository = repositories.ratings
+
+# Exponer repositorios a blueprints vía extensions
+app.extensions = getattr(app, "extensions", {})
+app.extensions["repositories"] = repositories
+
 jwt = JWTManager(app)
 if app.config["CORS_ORIGINS"]:
     CORS(app, origins=app.config["CORS_ORIGINS"])
@@ -245,29 +142,17 @@ def allowed_file(filename):
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-def serialize_comment(comment, entity_type):
-    comment['_id'] = str(comment['_id'])
-    if entity_type == 'profile':
-        comment['entity_id'] = str(comment['entity_id'])
-    comment['user_id'] = str(comment['user_id'])
-
-    if isinstance(comment.get('timestamp'), datetime):
-        comment['timestamp'] = comment['timestamp'].isoformat()
-    else:
-        try:
-            comment['timestamp'] = datetime.fromisoformat(comment['timestamp']).isoformat()
-        except (ValueError, TypeError):
-            comment['timestamp'] = "Desconocido"
-
-    comment['likes'] = int(comment.get('likes', 0))
-    comment['dislikes'] = int(comment.get('dislikes', 0))
-    comment['liked_by'] = [str(uid) for uid in comment.get('liked_by', [])] if isinstance(comment.get('liked_by'), list) else []
-    comment['disliked_by'] = [str(uid) for uid in comment.get('disliked_by', [])] if isinstance(comment.get('disliked_by'), list) else []
-    return comment
-
-
 def resolve_profile_entity_id(entity_id):
     return users_repository.get_profile_entity_id(entity_id)
+
+
+# Registrar blueprints
+from .blueprints import comments, favorites, ratings, social
+
+app.register_blueprint(comments.bp)
+app.register_blueprint(favorites.bp)
+app.register_blueprint(ratings.bp)
+app.register_blueprint(social.bp)
 
 
 # Validación de datos de usuario con Marshmallow
@@ -1074,386 +959,7 @@ def get_album_tracks():
         return jsonify({"message": f"Error al obtener las canciones del álbum: {str(e)}"}), 500
 
 
-# ------------------------------ Rutas de Comentarios ----------------------------------------
-
-@app.route('/<entity_type>/<entity_id>/comments', methods=['POST'])
-@jwt_required()
-@rate_limit(30)
-def add_comment(entity_type, entity_id):
-    try:
-        # Validar entity_type
-        validate_entity_type(entity_type)
-
-        current_user_email = get_jwt_identity()
-        user = users_repository.find_by_email(current_user_email)
-        if not user:
-            return jsonify({"message": "Usuario no encontrado."}), 404
-
-        user_id = str(user['_id'])
-        username = user['username']
-        user_photo = user.get('profile_picture', "")
-
-        # Obtener y validar el texto del comentario
-        data = get_json_body()
-        comment_text = get_string_field(data, 'comment_text', max_length=500)
-
-        if entity_type == 'profile':
-            entity_obj_id = resolve_profile_entity_id(entity_id)
-            if not entity_obj_id:
-                return jsonify({"message": "ID de entidad inválido."}), 400
-        else:
-            # Verificar la existencia de la entidad en Spotify
-            access_token = get_valid_spotify_token(current_user_email, users_repository)
-            if not access_token:
-                return jsonify({"message": "Por favor, inicia sesión en Spotify."}), 401
-            sp = spotipy.Spotify(auth=access_token)
-            entity_exists = verify_entity_exists(entity_type, entity_id, sp)
-            if not entity_exists:
-                return jsonify({"message": f"{entity_type.capitalize()} no encontrado."}), 404
-            entity_obj_id = entity_id  # Mantener el entity_id como cadena
-
-        # Crear el documento de comentario
-        comment = {
-            "entity_type": entity_type,
-            "entity_id": entity_obj_id,
-            "user_id": user_id,
-            "username": username,
-            "user_photo": user_photo,
-            "comment_text": comment_text,
-            "timestamp": datetime.now(timezone.utc),
-            "likes": 0,
-            "dislikes": 0,
-            "liked_by": [],
-            "disliked_by": []
-        }
-
-        inserted_comment = comments_repository.create(comment)
-        inserted_comment = serialize_public_comment(inserted_comment, entity_type)
-
-        return jsonify({"message": "Comentario agregado exitosamente.", "comment": inserted_comment}), 201
-
-    except ValidationError as e:
-        raise e
-    except Exception as e:
-        logger.exception("Error al agregar comentario")
-        return internal_error("Error al agregar el comentario.")
-
-
-@app.route('/<entity_type>/<entity_id>/comments/<comment_id>', methods=['DELETE'])
-@jwt_required()
-@rate_limit(60)
-def delete_comment(entity_type, entity_id, comment_id):
-    try:
-        validate_entity_type(entity_type)
-
-        current_user_email = get_jwt_identity()
-        user = users_repository.find_by_email(current_user_email)
-        if not user:
-            return jsonify({"message": "Usuario no encontrado."}), 404
-
-        user_id = str(user['_id'])  
-
-        if entity_type == 'profile':
-            entity_obj_id = resolve_profile_entity_id(entity_id)
-            if not entity_obj_id:
-                return jsonify({"message": "ID de entidad inválido."}), 400
-        else:
-            access_token = get_valid_spotify_token(current_user_email, users_repository)
-            if not access_token:
-                return jsonify({"message": "Por favor, inicia sesión en Spotify."}), 401
-            sp = spotipy.Spotify(auth=access_token)
-            entity_exists = verify_entity_exists(entity_type, entity_id, sp)
-            if not entity_exists:
-                return jsonify({"message": f"{entity_type.capitalize()} no encontrado."}), 404
-            entity_obj_id = entity_id
-
-        comment = comments_repository.find_for_entity(comment_id, entity_type, entity_obj_id)
-
-        if not comment:
-            return jsonify({"message": "Comentario no encontrado."}), 404
-
-        # Verificar que el usuario actual es el propietario del comentario
-        if comment['user_id'] != user_id:
-            return jsonify({"message": "No tienes permiso para eliminar este comentario."}), 403
-
-        comments_repository.delete_by_id(comment_id)
-
-        return jsonify({"message": "Comentario eliminado exitosamente."}), 200
-
-    except ValidationError as e:
-        raise e
-    except Exception as e:
-        logger.exception("Error al eliminar comentario")
-        return internal_error("Error al eliminar el comentario.")
-
-
-@app.route('/<entity_type>/<entity_id>/comments', methods=['GET'])
-@jwt_required()
-def get_comments(entity_type, entity_id):
-    try:
-        app.logger.info(f"Solicitud para obtener comentarios: entity_type={entity_type}, entity_id={entity_id}")
-
-        validate_entity_type(entity_type)
-
-        if entity_type == 'profile':
-            entity_obj_id = resolve_profile_entity_id(entity_id)
-            if not entity_obj_id:
-                app.logger.warning(f"ID de entidad inválido: {entity_id}")
-                return jsonify({"message": "ID de entidad inválido."}), 400
-        else:
-            current_user_email = get_jwt_identity()
-            access_token = get_valid_spotify_token(current_user_email, users_repository)
-            if not access_token:
-                app.logger.error("Token de acceso a Spotify no disponible.")
-                return jsonify({"message": "Por favor, inicia sesión en Spotify."}), 401
-            sp = spotipy.Spotify(auth=access_token)
-            entity_exists = verify_entity_exists(entity_type, entity_id, sp)
-            if not entity_exists:
-                app.logger.warning(f"{entity_type.capitalize()} no encontrado: {entity_id}")
-                return jsonify({"message": f"{entity_type.capitalize()} no encontrado."}), 404
-            entity_obj_id = entity_id
-
-        try:
-            page = get_int_arg('page', 1, minimum=1)
-            limit = get_int_arg('limit', 10, minimum=1, maximum=100)
-        except ValidationError as exc:
-            app.logger.warning("Parámetros de paginación inválidos.")
-            raise exc
-
-        skip = (page - 1) * limit
-
-        comments_cursor = comments_repository.list_for_entity(entity_type, entity_obj_id, skip, limit)
-
-        comments = []
-        for comment in comments_cursor:
-            try:
-                comments.append(serialize_public_comment(comment, entity_type))
-            except Exception as e:
-                app.logger.error(f"Error al procesar el comentario {comment.get('_id')}: {str(e)}")
-                return internal_error("Error al procesar un comentario.")
-
-        # Obtener el total de comentarios para calcular el número de páginas
-        total_comments = comments_repository.count_for_entity(entity_type, entity_obj_id)
-
-        total_pages = (total_comments + limit - 1) // limit
-
-        app.logger.info(f"Comentarios obtenidos: {len(comments)} para la página {page}")
-
-        return jsonify({
-            "comments": comments,
-            "pagination": {
-                "total_comments": total_comments,
-                "total_pages": total_pages,
-                "current_page": page
-            }
-        }), 200
-
-    except ValidationError as e:
-        raise e
-    except Exception as e:
-        app.logger.error(f"Error al obtener los comentarios: {str(e)}")
-        return internal_error("Error al obtener los comentarios.")
-
-# ------------------------------------ Likes -------------------------------------------------
-
-# Ruta para dar "like" a un comentario
-@app.route('/<entity_type>/<entity_id>/comments/<comment_id>/like', methods=['POST'])
-@jwt_required()
-@rate_limit(120)
-def like_comment(entity_type, entity_id, comment_id):
-    try:
-        current_user_email = get_jwt_identity()
-        user = users_repository.find_by_email(current_user_email)
-        if not user:
-            return jsonify({"message": "Usuario no encontrado."}), 404
-        user_id = str(user['_id'])  
-
-        validate_entity_type(entity_type)
-
-        if entity_type == 'profile':
-            entity_obj_id = resolve_profile_entity_id(entity_id)
-            if not entity_obj_id:
-                return jsonify({"message": "ID de entidad inválido."}), 400
-        else:
-            access_token = get_valid_spotify_token(current_user_email, users_repository)
-            if not access_token:
-                return jsonify({"message": "Por favor, inicia sesión en Spotify."}), 401
-            sp = spotipy.Spotify(auth=access_token)
-            entity_exists = verify_entity_exists(entity_type, entity_id, sp)
-            if not entity_exists:
-                return jsonify({"message": f"{entity_type.capitalize()} no encontrado."}), 404
-            entity_obj_id = entity_id
-
-        # Buscar el comentario
-        comment = comments_repository.find_for_entity(comment_id, entity_type, entity_obj_id)
-        if not comment:
-            return jsonify({"message": "Comentario no encontrado."}), 404
-
-        # Lógica para "like"
-        liked_by = comment.get('liked_by', [])
-        disliked_by = comment.get('disliked_by', [])
-
-        if user_id in liked_by:
-            # Si el usuario ya ha dado like, lo elimina
-            comments_repository.update_reaction(comment_id, {
-                '$inc': {'likes': -1},
-                '$pull': {'liked_by': user_id}
-            })
-            liked = False
-        else:
-            # Agrega el like y elimina el dislike si existía
-            update_fields = {
-                '$inc': {'likes': 1},
-                '$addToSet': {'liked_by': user_id},
-                '$pull': {'disliked_by': user_id}
-            }
-            # Si el usuario había dado dislike previamente, decrementa dislikes
-            if user_id in disliked_by:
-                update_fields['$inc']['dislikes'] = -1
-            comments_repository.update_reaction(comment_id, update_fields)
-            liked = True
-
-        # Obtener el comentario actualizado
-        updated_comment = serialize_public_comment(comments_repository.find_by_id(comment_id), entity_type)
-
-        return jsonify({"message": "Like actualizado.", "comment": updated_comment, "liked": liked}), 200
-
-    except ValidationError as e:
-        raise e
-    except Exception as e:
-        app.logger.exception("Error en like_comment")
-        return internal_error("Error al procesar el like.")
-
-
-@app.route('/<entity_type>/<entity_id>/comments/<comment_id>/dislike', methods=['POST'])
-@jwt_required()
-@rate_limit(120)
-def dislike_comment(entity_type, entity_id, comment_id):
-    try:
-        # Obtener el email del usuario desde el JWT
-        current_user_email = get_jwt_identity()
-        user = users_repository.find_by_email(current_user_email)
-        if not user:
-            return jsonify({"message": "Usuario no encontrado."}), 404
-        user_id = str(user['_id'])
-
-        # Validar entity_type
-        validate_entity_type(entity_type)
-
-        if entity_type == 'profile':
-            entity_obj_id = resolve_profile_entity_id(entity_id)
-            if not entity_obj_id:
-                return jsonify({"message": "ID de entidad inválido."}), 400
-        else:
-            # Verificar la existencia de la entidad en Spotify
-            access_token = get_valid_spotify_token(current_user_email, users_repository)
-            if not access_token:
-                return jsonify({"message": "Por favor, inicia sesión en Spotify."}), 401
-            sp = spotipy.Spotify(auth=access_token)
-            entity_exists = verify_entity_exists(entity_type, entity_id, sp)
-            if not entity_exists:
-                return jsonify({"message": f"{entity_type.capitalize()} no encontrado."}), 404
-            entity_obj_id = entity_id
-
-        # Buscar el comentario
-        comment = comments_repository.find_for_entity(comment_id, entity_type, entity_obj_id)
-        if not comment:
-            return jsonify({"message": "Comentario no encontrado."}), 404
-
-        # Lógica para "dislike"
-        liked_by = comment.get('liked_by', [])
-        disliked_by = comment.get('disliked_by', [])
-
-        if user_id in disliked_by:
-            # Si el usuario ya ha dado dislike, lo elimina
-            comments_repository.update_reaction(comment_id, {
-                '$inc': {'dislikes': -1},
-                '$pull': {'disliked_by': user_id}
-            })
-            disliked = False
-        else:
-            # Agrega el dislike y elimina el like si existía
-            update_fields = {
-                '$inc': {'dislikes': 1},
-                '$addToSet': {'disliked_by': user_id},
-                '$pull': {'liked_by': user_id}
-            }
-            # Si el usuario había dado like previamente, decrementa likes
-            if user_id in liked_by:
-                update_fields['$inc']['likes'] = -1
-            comments_repository.update_reaction(comment_id, update_fields)
-            disliked = True
-
-        # Obtener el comentario actualizado
-        updated_comment = serialize_public_comment(comments_repository.find_by_id(comment_id), entity_type)
-
-        return jsonify({"message": "Dislike actualizado.", "comment": updated_comment, "disliked": disliked}), 200
-
-    except ValidationError as e:
-        raise e
-    except Exception as e:
-        app.logger.exception("Error en dislike_comment")
-        return internal_error("Error al procesar el dislike.")
-
-
-#------------------------------------ Favoritos ----------------------
-
-@app.route('/add_favorite', methods=['POST'])
-@jwt_required()
-@rate_limit(80)
-def add_favorite():
-    data = get_json_body()
-    entity_type = get_string_field(data, 'entityType', max_length=20)
-    validate_entity_type(entity_type)
-    entity_id = get_string_field(data, 'entityId', max_length=120)
-    name = get_string_field(data, 'name', required=False, max_length=200)
-    image = get_string_field(data, 'image', required=False, max_length=1000)
-
-    current_user_email = get_jwt_identity()
-    user = users_repository.find_by_email(current_user_email)
-    if not user:
-        return jsonify({"message": "Usuario no encontrado."}), 404
-
-    if favorites_repository.exists(user, entity_id):
-        return jsonify({"message": "El favorito ya existe."}), 400
-
-    new_favorite = {
-        'entityType': entity_type,
-        'entityId': entity_id,
-        'name': name,
-        'image': image,
-    }
-
-    favorites_repository.add_for_email(current_user_email, new_favorite)
-
-    return jsonify({"message": "Favorito agregado exitosamente."}), 200
-
-
-@app.route('/remove_favorite', methods=['POST'])
-@jwt_required()
-@rate_limit(80)
-def remove_favorite():
-    data = get_json_body()
-    entity_id = get_string_field(data, 'entityId', max_length=120)
-
-    current_user_email = get_jwt_identity()
-
-    favorites_repository.remove_for_email(current_user_email, entity_id)
-
-    return jsonify({"message": "Favorito eliminado exitosamente."}), 200
-
-
-@app.route('/get_favorites', methods=['GET'])
-@jwt_required()
-def get_favorites():
-    current_user_email = get_jwt_identity()
-    user = users_repository.find_by_email(current_user_email)
-    if not user:
-        return jsonify({"message": "Usuario no encontrado."}), 404
-
-    favorites = favorites_repository.list_for_user(user)
-
-    return jsonify({'favorites': favorites}), 200
+# Comments, favorites, ratings, and social routes have been moved to blueprints.
 
 
 
@@ -1484,181 +990,7 @@ def recently_listened():
         return jsonify({'error': f'Error al obtener canciones reproducidas recientemente: {str(e)}'}), 500
 
 
-#----------------------------- Rating ----------------------
-
-@app.route('/rate_entity', methods=['POST'])
-@jwt_required()
-@rate_limit(60)
-def rate_entity():
-    data = get_json_body()
-    entity_type = get_string_field(data, 'entityType', max_length=20)
-    entity_id = get_string_field(data, 'entityId', max_length=120)
-    rating = data.get('rating')  # Número entre 1 y 10
-
-    logger.info(f"Received rate_entity request: entity_type={entity_type}, entity_id={entity_id}, rating={rating}")
-
-    if entity_type not in ['song', 'album', 'artist']:
-        logger.warning(f"Invalid entityType: {entity_type}")
-        return jsonify({'message': 'Tipo de entidad inválido.'}), 400
-
-    if not isinstance(rating, int) or not (1 <= rating <= 10):
-        logger.warning(f"Invalid rating: {rating}")
-        return jsonify({'message': 'La calificación debe ser un número entre 1 y 10.'}), 400
-
-    user_email = get_jwt_identity()
-    user = users_repository.find_by_email(user_email)
-    if not user:
-        logger.warning(f"User not found: {user_email}")
-        return jsonify({'message': 'Usuario no encontrado.'}), 404
-
-    user_id = user['_id']
-    try:
-        existing_rating = ratings_repository.find_user_rating(entity_type, entity_id, user_id)
-
-        if existing_rating:
-            logger.info(f"Usuario {user_email} ya ha calificado la entidad {entity_id}")
-            return jsonify({'message': 'Ya has calificado esta entidad.'}), 400
-
-        ratings_repository.create(entity_type, entity_id, user_id, rating)
-        logger.info(f"Calificación añadida por {user_email} a {entity_type} {entity_id}")
-
-        summary = ratings_repository.summarize_entity(entity_type, entity_id)
-        logger.info(
-            f"Entidad {entity_id} calculada con averageRating={summary['averageRating']}, "
-            f"ratingCount={summary['ratingCount']}"
-        )
-        return jsonify({
-            'message': 'Calificación añadida correctamente.',
-            'averageRating': summary['averageRating'],
-            'ratingCount': summary['ratingCount'],
-        }), 201
-
-    except Exception as e:
-        logger.error(f"Error al añadir calificación: {e}")
-        return jsonify({'message': 'Error interno del servidor.'}), 500
-   
-  
-
-@app.route('/get_user_rating', methods=['GET'])
-@jwt_required()
-def get_user_rating():
-    entity_type = request.args.get('entityType', '').strip()
-    entity_id = request.args.get('entityId', '').strip()
-
-    logger.info(f"Solicitud para obtener calificación: entity_type={entity_type}, entity_id={entity_id}")
-
-    if not entity_type or not entity_id:
-        logger.warning("Missing parameters in get_user_rating request.")
-        return jsonify({'message': 'Todos los parámetros son obligatorios.'}), 400
-
-    if entity_type not in ['song', 'album', 'artist']:
-        logger.warning(f"Invalid entityType: {entity_type}")
-        return jsonify({'message': 'Tipo de entidad inválido.'}), 400
-
-    user_email = get_jwt_identity()
-    user = users_repository.find_by_email(user_email)
-    if not user:
-        logger.warning(f"User not found: {user_email}")
-        return jsonify({'message': 'Usuario no encontrado.'}), 404
-
-    user_id = user['_id']
-
-    try:
-        existing_rating = ratings_repository.find_user_rating(entity_type, entity_id, user_id)
-
-        if existing_rating:
-            logger.info(f"Calificación encontrada: {existing_rating['rating']}")
-            return jsonify({'rating': existing_rating['rating']}), 200
-        else:
-            logger.info("No se encontró calificación existente.")
-            return jsonify({'rating': 0}), 200
-
-    except Exception as e:
-        logger.error(f"Error al obtener calificación del usuario: {e}")
-        return jsonify({'message': 'Error interno del servidor.'}), 500
-
-
-@app.route('/follow_user', methods=['POST'])
-@jwt_required()
-@rate_limit(60)
-def follow_user():
-    current_user_email = get_jwt_identity()
-    current_user = users_repository.find_by_email(current_user_email)
-    if not current_user:
-        return jsonify({"message": "Usuario no encontrado"}), 404
-
-    data = get_json_body()
-    profile_id = get_string_field(data, "profile_id", max_length=120)
-
-    target_user = users_repository.find_by_id(profile_id)
-    if not target_user:
-        return jsonify({"message": "Perfil no encontrado"}), 404
-
-    current_user_id = current_user["_id"]
-
-    # Añadir el current_user a los followers del target
-    users_repository.add_to_set_by_id(target_user["_id"], "followers", str(current_user_id))
-
-    # Añadir el target a los following del current_user
-    users_repository.add_to_set_by_id(current_user_id, "following", str(target_user["_id"]))
-
-    return jsonify({"message": "Usuario seguido exitosamente"}), 200
-
-
-@app.route('/unfollow_user', methods=['POST'])
-@jwt_required()
-@rate_limit(60)
-def unfollow_user():
-    current_user_email = get_jwt_identity()
-    current_user = users_repository.find_by_email(current_user_email)
-    if not current_user:
-        return jsonify({"message": "Usuario no encontrado"}), 404
-
-    data = get_json_body()
-    profile_id = get_string_field(data, "profile_id", max_length=120)
-
-    target_user = users_repository.find_by_id(profile_id)
-    if not target_user:
-        return jsonify({"message": "Perfil no encontrado"}), 404
-
-    current_user_id = current_user["_id"]
-
-    # Remover current_user de los followers del target
-    users_repository.pull_by_id(target_user["_id"], "followers", str(current_user_id))
-
-    # Remover target de los following del current_user
-    users_repository.pull_by_id(current_user_id, "following", str(target_user["_id"]))
-
-    return jsonify({"message": "Usuario dejado de seguir exitosamente"}), 200
-
-@app.route('/get_following_details', methods=['POST'])
-@jwt_required()
-def get_following_details():
-    current_user_email = get_jwt_identity()
-    current_user = users_repository.find_by_email(current_user_email)
-    if not current_user:
-        return jsonify({"message": "Usuario no encontrado"}), 404
-
-    data = get_json_body()
-    ids = data.get("ids", [])
-    if not isinstance(ids, list):
-        return jsonify({"message": "El campo 'ids' debe ser una lista."}), 400
-    ids = [str(item) for item in ids[:100] if item]
-
-    found_users = users_repository.find_many_by_ids(ids)
-
-    # Preparar la respuesta con los datos relevantes
-    # Ajusta los campos según las necesidades del frontend
-    users_list = []
-    for u in found_users:
-        users_list.append({
-            "id": str(u["_id"]),
-            "username": u.get("username", ""),
-            "profile_picture": u.get("profile_picture", ""),  
-            # Agrega otros campos si lo deseas, como 'email' o 'favorites'
-        })
-
-    return jsonify({"users": users_list}), 200
+# Ratings and social routes have been moved to blueprints.
 
 
 

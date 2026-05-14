@@ -1,0 +1,96 @@
+from flask import Blueprint, jsonify, request
+from flask_jwt_extended import jwt_required, get_jwt_identity
+from marshmallow import ValidationError
+import logging
+
+from ..utils.api import get_json_body, get_string_field, rate_limit, internal_error
+
+logger = logging.getLogger(__name__)
+bp = Blueprint("ratings", __name__)
+
+
+def _get_repos():
+    from flask import current_app
+    return current_app.extensions["repositories"]
+
+
+@bp.route("/rate_entity", methods=["POST"])
+@jwt_required()
+@rate_limit(60)
+def rate_entity():
+    try:
+        data = get_json_body()
+        entity_type = get_string_field(data, "entityType", max_length=20)
+        entity_id = get_string_field(data, "entityId", max_length=120)
+        rating = data.get("rating")
+
+        logger.info(f"rate_entity: entity_type={entity_type}, entity_id={entity_id}, rating={rating}")
+
+        if entity_type not in ("song", "album", "artist"):
+            logger.warning(f"Invalid entityType: {entity_type}")
+            return jsonify({"message": "Tipo de entidad inválido."}), 400
+
+        if not isinstance(rating, int) or not (1 <= rating <= 10):
+            logger.warning(f"Invalid rating: {rating}")
+            return jsonify({"message": "La calificación debe ser un número entre 1 y 10."}), 400
+
+        repos = _get_repos()
+        user_email = get_jwt_identity()
+        user = repos.users.find_by_email(user_email)
+        if not user:
+            logger.warning(f"User not found: {user_email}")
+            return jsonify({"message": "Usuario no encontrado."}), 404
+
+        user_id = user["_id"]
+        existing = repos.ratings.find_user_rating(entity_type, entity_id, user_id)
+        if existing:
+            logger.info(f"Usuario {user_email} ya ha calificado la entidad {entity_id}")
+            return jsonify({"message": "Ya has calificado esta entidad."}), 400
+
+        repos.ratings.create(entity_type, entity_id, user_id, rating)
+        summary = repos.ratings.summarize_entity(entity_type, entity_id)
+        logger.info(f"Entidad {entity_id} averageRating={summary['averageRating']}, ratingCount={summary['ratingCount']}")
+        return jsonify({
+            "message": "Calificación añadida correctamente.",
+            "averageRating": summary["averageRating"],
+            "ratingCount": summary["ratingCount"],
+        }), 201
+
+    except ValidationError:
+        raise
+    except Exception:
+        logger.exception("Error al añadir calificación")
+        return internal_error("Error al añadir calificación.")
+
+
+@bp.route("/get_user_rating", methods=["GET"])
+@jwt_required()
+def get_user_rating():
+    entity_type = request.args.get("entityType", "").strip()
+    entity_id = request.args.get("entityId", "").strip()
+
+    logger.info(f"get_user_rating: entity_type={entity_type}, entity_id={entity_id}")
+
+    if not entity_type or not entity_id:
+        logger.warning("Missing parameters in get_user_rating request.")
+        return jsonify({"message": "Todos los parámetros son obligatorios."}), 400
+
+    if entity_type not in ("song", "album", "artist"):
+        logger.warning(f"Invalid entityType: {entity_type}")
+        return jsonify({"message": "Tipo de entidad inválido."}), 400
+
+    repos = _get_repos()
+    user_email = get_jwt_identity()
+    user = repos.users.find_by_email(user_email)
+    if not user:
+        logger.warning(f"User not found: {user_email}")
+        return jsonify({"message": "Usuario no encontrado."}), 404
+
+    user_id = user["_id"]
+    existing = repos.ratings.find_user_rating(entity_type, entity_id, user_id)
+    if existing:
+        logger.info(f"Calificación encontrada: {existing['rating']}")
+        return jsonify({"rating": existing["rating"]}), 200
+    else:
+        logger.info("No se encontró calificación existente.")
+        return jsonify({"rating": 0}), 200
