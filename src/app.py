@@ -88,6 +88,18 @@ def parse_timestamp(value):
     return None
 
 
+def get_user_favorites(user):
+    if not user:
+        return []
+    if app.config["DATABASE_PROVIDER"] == "mongo":
+        return user.get("favorites", [])
+    return favorites_repository.list_for_user(user)
+
+
+def favorite_key(item):
+    return f"{item.get('entityType')}:{item.get('entityId')}"
+
+
 # Leer la clave de API desde las variables de entorno
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 
@@ -982,11 +994,71 @@ def get_profile_details():
             return jsonify({"message": "Perfil no encontrado"}), 404
 
         profile_data = serialize_public_profile(user, include_favorites=True)
+        profile_data["favorites"] = get_user_favorites(user)
         profile_data["comments_enabled"] = True
         return jsonify(profile_data), 200
     except Exception as e:
         logger.exception("Error al cargar perfil")
         return internal_error("Error al cargar el perfil.")
+
+
+@app.route('/profile_compatibility', methods=['GET'])
+@jwt_required()
+@rate_limit(60)
+def profile_compatibility():
+    profile_id = request.args.get('profile_id')
+    if not profile_id:
+        return jsonify({"message": "Se requiere profile_id"}), 400
+
+    try:
+        current_user = users_repository.find_by_email(get_jwt_identity())
+        target_user = users_repository.find_by_id(profile_id)
+        if not current_user or not target_user:
+            return jsonify({"message": "Perfil no encontrado"}), 404
+
+        current_favorites = get_user_favorites(current_user)
+        target_favorites = get_user_favorites(target_user)
+
+        current_by_key = {favorite_key(item): item for item in current_favorites if item.get("entityId")}
+        target_by_key = {favorite_key(item): item for item in target_favorites if item.get("entityId")}
+        shared_keys = set(current_by_key.keys()) & set(target_by_key.keys())
+        union_count = len(set(current_by_key.keys()) | set(target_by_key.keys()))
+
+        current_artists = Counter()
+        target_artists = Counter()
+        for bucket, favorites in ((current_artists, current_favorites), (target_artists, target_favorites)):
+            for item in favorites:
+                if item.get("entityType") == "artist" and item.get("name"):
+                    bucket[item["name"]] += 2
+                if item.get("artist"):
+                    for artist in [part.strip() for part in item["artist"].split(",") if part.strip()]:
+                        bucket[artist] += 1
+
+        shared_artist_names = set(current_artists.keys()) & set(target_artists.keys())
+        shared_artist_weight = sum(min(current_artists[name], target_artists[name]) for name in shared_artist_names)
+        artist_pool = sum((current_artists | target_artists).values()) or 1
+        item_score = (len(shared_keys) / union_count) if union_count else 0
+        artist_score = shared_artist_weight / artist_pool
+        score = round((item_score * 0.72 + artist_score * 0.28) * 100)
+        if str(current_user["_id"]) == str(target_user["_id"]):
+            score = 100
+
+        shared_items = [target_by_key[key] for key in list(shared_keys)[:8]]
+        top_shared_artists = sorted(
+            [{"name": name, "count": min(current_artists[name], target_artists[name])} for name in shared_artist_names],
+            key=lambda item: (-item["count"], item["name"]),
+        )[:5]
+
+        return jsonify({
+            "score": score,
+            "sharedCount": len(shared_keys),
+            "totalCompared": union_count,
+            "sharedItems": shared_items,
+            "topSharedArtists": top_shared_artists,
+        }), 200
+    except Exception as e:
+        logger.exception("Error al calcular compatibilidad")
+        return internal_error("Error al calcular compatibilidad musical.")
 
 
 
