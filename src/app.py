@@ -6,6 +6,7 @@ from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity
 from marshmallow import Schema, fields, ValidationError
 from dotenv import load_dotenv
 from urllib.parse import urlencode
+from collections import Counter
 import base64
 import json
 import uuid
@@ -72,6 +73,19 @@ def build_frontend_redirect_url(return_url, token):
 
 def create_session_token(email):
     return create_access_token(identity=email, expires_delta=timedelta(days=30))
+
+
+def parse_timestamp(value):
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
 
 
 # Leer la clave de API desde las variables de entorno
@@ -1160,6 +1174,124 @@ def top_rated_charts():
     except Exception as e:
         logger.exception("Error al obtener charts")
         return internal_error("Error al obtener los charts.")
+
+
+@app.route('/wrapped/monthly', methods=['GET'])
+@jwt_required()
+@rate_limit(30)
+def monthly_wrapped():
+    user_email = get_jwt_identity()
+    current_user = users_repository.find_by_email(user_email)
+    if not current_user:
+        return jsonify({"message": "Usuario no encontrado."}), 404
+
+    month_param = request.args.get("month")
+    now = datetime.now(timezone.utc)
+    try:
+        if month_param:
+            target_date = datetime.strptime(month_param, "%Y-%m")
+            target_year = target_date.year
+            target_month = target_date.month
+        else:
+            target_year = now.year
+            target_month = now.month
+    except ValueError:
+        return json_error("Formato de mes inválido. Usa YYYY-MM.", 400, code="invalid_month")
+
+    user_id = str(current_user["_id"])
+    cache_key = f"wrapped:monthly:{user_id}:{target_year:04d}-{target_month:02d}"
+    cached = app.extensions["cache"].get(cache_key)
+    if cached is not None:
+        return jsonify(cached), 200
+
+    def is_target_month(value):
+        ts = parse_timestamp(value)
+        if not ts:
+            return False
+        return ts.year == target_year and ts.month == target_month
+
+    def normalize_rating(row):
+        return {
+            "entityType": row.get("entity_type") or row.get("entityType"),
+            "entityId": row.get("entity_id") or row.get("entityId"),
+            "rating": row.get("rating") or 0,
+            "name": row.get("name"),
+            "image": row.get("image"),
+            "artist": row.get("artist"),
+            "timestamp": row.get("created_at") or row.get("timestamp"),
+        }
+
+    def normalize_favorite(row):
+        return {
+            "entityType": row.get("entity_type") or row.get("entityType"),
+            "entityId": row.get("entity_id") or row.get("entityId"),
+            "name": row.get("name"),
+            "image": row.get("image"),
+            "artist": row.get("artist"),
+            "timestamp": row.get("created_at") or row.get("timestamp"),
+        }
+
+    try:
+        if app.config["DATABASE_PROVIDER"] == "mongo":
+            rating_rows = list(ratings_repository.collection.find({"userId": user_id}).sort("timestamp", -1).limit(1000))
+            favorite_rows = favorites_repository.list_for_user(current_user)
+        else:
+            rating_rows = repositories.ratings.client.select(
+                "ratings",
+                user_id=user_id,
+                limit=1000,
+                order="created_at.desc",
+            )
+            favorite_rows = repositories.favorites.client.select(
+                "favorites",
+                user_id=user_id,
+                limit=1000,
+                order="created_at.desc",
+            )
+
+        monthly_ratings = [normalize_rating(row) for row in rating_rows if is_target_month(row.get("created_at") or row.get("timestamp"))]
+        all_favorites = [normalize_favorite(row) for row in favorite_rows]
+        monthly_favorites = [fav for fav in all_favorites if is_target_month(fav.get("timestamp"))]
+
+        rating_values = [float(item["rating"] or 0) for item in monthly_ratings]
+        type_counts = Counter(item["entityType"] for item in monthly_ratings if item.get("entityType"))
+        favorite_type_counts = Counter(item["entityType"] for item in all_favorites if item.get("entityType"))
+
+        artist_counter = Counter()
+        for item in monthly_ratings + all_favorites:
+            if item.get("entityType") == "artist" and item.get("name"):
+                artist_counter[item["name"]] += 1
+            if item.get("artist"):
+                for artist in [part.strip() for part in item["artist"].split(",") if part.strip()]:
+                    artist_counter[artist] += 1
+
+        top_rated = sorted(
+            monthly_ratings,
+            key=lambda item: (item.get("rating") or 0, str(item.get("timestamp") or "")),
+            reverse=True,
+        )[:5]
+
+        wrapped = {
+            "month": f"{target_year:04d}-{target_month:02d}",
+            "summary": {
+                "ratingsCount": len(monthly_ratings),
+                "averageRating": round(sum(rating_values) / len(rating_values), 2) if rating_values else 0,
+                "favoritesCount": len(all_favorites),
+                "newFavoritesCount": len(monthly_favorites),
+                "topEntityType": type_counts.most_common(1)[0][0] if type_counts else None,
+            },
+            "ratingsByType": dict(type_counts),
+            "favoritesByType": dict(favorite_type_counts),
+            "topArtists": [{"name": name, "count": count} for name, count in artist_counter.most_common(5)],
+            "topRated": top_rated,
+            "recentFavorites": monthly_favorites[:5],
+        }
+
+        app.extensions["cache"].set(cache_key, wrapped, ttl=300)
+        return jsonify(wrapped), 200
+    except Exception as e:
+        logger.exception("Error al obtener monthly wrapped")
+        return internal_error("Error al obtener tu resumen mensual.")
 
 
 @app.route('/activity', methods=['GET'])
