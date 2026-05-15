@@ -1120,7 +1120,12 @@ def recently_listened():
 
     access_token = get_valid_spotify_token(user_email, users_repository)
     if not access_token:
-        return jsonify({'error': 'Por favor, inicia sesión en Spotify.'}), 401
+        return jsonify({
+            'is_playing': False,
+            'item': None,
+            'requires_reconnect': True,
+            'message': 'Por favor, vuelve a conectar Spotify.',
+        }), 200
 
     try:
         sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
@@ -1156,9 +1161,17 @@ def spotify_currently_playing():
         sp = spotipy.Spotify(auth=access_token, requests_timeout=15)
         current = sp.current_user_playing_track()
         if not current or not current.get('item'):
-            return jsonify({'is_playing': False, 'item': None}), 200
+            return jsonify({'is_playing': False, 'item': None, 'requires_reconnect': False}), 200
 
         track = current['item']
+        if track.get('type') != 'track' or not track.get('album'):
+            return jsonify({
+                'is_playing': current.get('is_playing', False),
+                'item': None,
+                'requires_reconnect': False,
+                'message': 'El contenido actual no es una canción.',
+            }), 200
+
         item = {
             'id': track['id'],
             'name': track['name'],
@@ -1167,10 +1180,20 @@ def spotify_currently_playing():
             'cover_image': track['album']['images'][0]['url'] if track['album']['images'] else None,
             'url': track['external_urls']['spotify'],
         }
-        return jsonify({'is_playing': current.get('is_playing', False), 'item': item}), 200
+        return jsonify({'is_playing': current.get('is_playing', False), 'item': item, 'requires_reconnect': False}), 200
+    except spotipy.exceptions.SpotifyException as e:
+        if e.http_status in (401, 403):
+            return jsonify({
+                'is_playing': False,
+                'item': None,
+                'requires_reconnect': True,
+                'message': 'Vuelve a conectar Spotify para ver lo que escuchas.',
+            }), 200
+        logger.exception("Error de Spotify al obtener currently playing")
+        return jsonify({'is_playing': False, 'item': None, 'requires_reconnect': False, 'message': 'Spotify no respondió.'}), 200
     except Exception as e:
         logger.exception("Error al obtener currently playing")
-        return jsonify({'error': 'Error al obtener la canción actual.'}), 500
+        return jsonify({'is_playing': False, 'item': None, 'requires_reconnect': False, 'message': 'Error al obtener la canción actual.'}), 200
 
 
 @app.route('/charts/top_rated', methods=['GET'])

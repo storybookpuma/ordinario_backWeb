@@ -30,6 +30,11 @@ class FakeRatingsRepository:
         self.collection = FakeCollection(rows)
 
 
+class FakeFavoritesRepository:
+    def list_for_user(self, user):
+        return user.get("favorites", []) if user else []
+
+
 class FakeUsersRepository:
     def __init__(self):
         self.users = {
@@ -69,6 +74,7 @@ class FakeSpotify:
             "is_playing": True,
             "item": {
                 "id": "track-1",
+                "type": "track",
                 "name": "Saturn",
                 "artists": [{"name": "SZA"}],
                 "album": {"name": "Lana", "images": [{"url": "https://example.com/cover.jpg"}]},
@@ -86,7 +92,7 @@ class ProfileFeatureTests(unittest.TestCase):
 
     def setUp(self):
         self.app_module.users_repository = FakeUsersRepository()
-        self.app_module.favorites_repository = object()
+        self.app_module.favorites_repository = FakeFavoritesRepository()
         self.app_module.ratings_repository = FakeRatingsRepository([
             {
                 "entityType": "song",
