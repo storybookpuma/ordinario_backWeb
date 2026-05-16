@@ -14,6 +14,26 @@ def _get_repos():
     return current_app.extensions["repositories"]
 
 
+def _record_favorite_signal(repos, user_id, favorite):
+    try:
+        repos.music_signals.create(
+            user_id,
+            "songbox",
+            "favorite",
+            favorite["entityType"],
+            entity_id=favorite["entityId"],
+            spotify_id=favorite["entityId"],
+            strength=0.85,
+            metadata={
+                "name": favorite.get("name"),
+                "image": favorite.get("image"),
+                "artist": favorite.get("artist"),
+            },
+        )
+    except Exception:
+        logger.exception("Failed to record favorite music signal")
+
+
 @bp.route("/add_favorite", methods=["POST"])
 @jwt_required()
 @rate_limit(80)
@@ -44,6 +64,7 @@ def add_favorite():
             "artist": artist,
         }
         repos.favorites.add_for_email(current_user_email, new_favorite)
+        _record_favorite_signal(repos, user["_id"], new_favorite)
         return jsonify({"message": "Favorito agregado exitosamente."}), 200
 
     except ValidationError:

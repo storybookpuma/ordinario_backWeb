@@ -23,7 +23,7 @@ def create_spotify_oauth(user_email, redirect_uri=None):
         client_id=client_id,
         client_secret=client_secret,
         redirect_uri=redirect_uri,
-        scope="user-read-email user-top-read user-read-recently-played user-read-currently-playing user-read-playback-state",
+        scope="user-read-email user-read-private user-top-read user-read-recently-played user-read-currently-playing user-read-playback-state user-library-read user-follow-read",
         cache_path=None
     )
 

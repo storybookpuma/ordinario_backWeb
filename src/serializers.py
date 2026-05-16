@@ -12,6 +12,7 @@ def serialize_current_user(user):
         "followers": user.get("followers", []),
         "following": user.get("following", []),
         "trivia_scores": user.get("trivia_scores", []),
+        "spotify_connected": bool(user.get("spotify_refresh_token") or user.get("spotify_access_token")),
     }
 
 

@@ -151,6 +151,8 @@ def handle_unexpected_error(error):
 
 if app.config["CREATE_DB_INDEXES"]:
     ratings_repository.ensure_indexes()
+    repositories.reviews.ensure_indexes()
+    repositories.music_signals.ensure_indexes()
 
 
 # Extensiones permitidas
@@ -167,12 +169,14 @@ def resolve_profile_entity_id(entity_id):
 
 
 # Registrar blueprints
-from .blueprints import comments, favorites, ratings, social
+from .blueprints import comments, favorites, ratings, reviews, social, spotify_data
 
 app.register_blueprint(comments.bp)
 app.register_blueprint(favorites.bp)
 app.register_blueprint(ratings.bp)
+app.register_blueprint(reviews.bp)
 app.register_blueprint(social.bp)
+app.register_blueprint(spotify_data.bp)
 
 
 # Validación de datos de usuario con Marshmallow
@@ -410,6 +414,27 @@ def update_username():
         return jsonify({'username': new_username}), 200
     else:
         return jsonify({'message': 'Usuario no encontrado'}), 404
+
+
+@app.route('/unlink_spotify', methods=['POST'])
+@jwt_required()
+@rate_limit(10)
+def unlink_spotify():
+    user_email = get_jwt_identity()
+    user = users_repository.find_by_email(user_email)
+    if not user:
+        return jsonify({'message': 'Usuario no encontrado'}), 404
+
+    users_repository.update_by_email(
+        user_email,
+        {'$set': {
+            'spotify_access_token': None,
+            'spotify_refresh_token': None,
+            'spotify_token_expires_at': None,
+        }}
+    )
+    updated_user = users_repository.find_by_email(user_email) or user
+    return jsonify({'message': 'Spotify desvinculado.', 'user': serialize_current_user(updated_user)}), 200
 
 
 # ------------------------------ Endpoints de SearchScreen ----------------------------------
@@ -854,6 +879,7 @@ def song_details():
         rating_summary = ratings_repository.summarize_entity('song', song_id)
         song_info['averageRating'] = rating_summary['averageRating']
         song_info['ratingCount'] = rating_summary['ratingCount']
+        song_info['ratingDistribution'] = rating_summary['ratingDistribution']
 
         app.extensions["cache"].set(cache_key, song_info, ttl=600)
         return jsonify({'song': song_info}), 200
@@ -915,6 +941,7 @@ def album_details():
         rating_summary = ratings_repository.summarize_entity('album', album_id)
         album_info['averageRating'] = rating_summary['averageRating']
         album_info['ratingCount'] = rating_summary['ratingCount']
+        album_info['ratingDistribution'] = rating_summary['ratingDistribution']
 
         app.extensions["cache"].set(cache_key, album_info, ttl=600)
         return jsonify({'album': album_info}), 200
@@ -970,6 +997,7 @@ def artist_details():
         rating_summary = ratings_repository.summarize_entity('artist', artist_id)
         artist_info['averageRating'] = rating_summary['averageRating']
         artist_info['ratingCount'] = rating_summary['ratingCount']
+        artist_info['ratingDistribution'] = rating_summary['ratingDistribution']
 
         app.extensions["cache"].set(cache_key, {'artist': artist_info, 'albums': albums_info}, ttl=600)
         return jsonify({'artist': artist_info, 'albums': albums_info}), 200
@@ -1000,6 +1028,32 @@ def get_profile_details():
     except Exception as e:
         logger.exception("Error al cargar perfil")
         return internal_error("Error al cargar el perfil.")
+
+
+@app.route('/public_profile/<username>', methods=['GET'])
+@rate_limit(60)
+def public_profile(username):
+    username = (username or '').strip()
+    if not username:
+        return jsonify({"message": "Se requiere username"}), 400
+
+    try:
+        user = users_repository.find_by_username(username)
+        if not user:
+            return jsonify({"message": "Perfil no encontrado"}), 404
+
+        favorites = get_user_favorites(user)
+        profile_data = serialize_public_profile(user)
+        profile_data["favorites"] = favorites[:24]
+        profile_data["counts"] = {
+            "favorites": len(favorites),
+            "followers": len(user.get("followers", []) or []),
+            "following": len(user.get("following", []) or []),
+        }
+        return jsonify(profile_data), 200
+    except Exception as e:
+        logger.exception("Error al cargar perfil público")
+        return internal_error("Error al cargar el perfil público.")
 
 
 @app.route('/profile_compatibility', methods=['GET'])
@@ -1039,9 +1093,66 @@ def profile_compatibility():
         artist_pool = sum((current_artists | target_artists).values()) or 1
         item_score = (len(shared_keys) / union_count) if union_count else 0
         artist_score = shared_artist_weight / artist_pool
-        score = round((item_score * 0.72 + artist_score * 0.28) * 100)
+        # Ratings similarity
+        current_ratings = ratings_repository.collection.find({"userId": str(current_user["_id"])}) if app.config["DATABASE_PROVIDER"] == "mongo" else repositories.ratings.client.select("ratings", user_id=str(current_user["_id"]), limit=1000)
+        target_ratings = ratings_repository.collection.find({"userId": str(target_user["_id"])}) if app.config["DATABASE_PROVIDER"] == "mongo" else repositories.ratings.client.select("ratings", user_id=str(target_user["_id"]), limit=1000)
+
+        def normalize_rating(row):
+            return {
+                "entityType": row.get("entity_type") or row.get("entityType"),
+                "entityId": row.get("entity_id") or row.get("entityId"),
+                "rating": float(row.get("rating") or 0),
+                "name": row.get("name"),
+                "image": row.get("image"),
+                "artist": row.get("artist"),
+            }
+
+        current_ratings_norm = [normalize_rating(r) for r in current_ratings]
+        target_ratings_norm = [normalize_rating(r) for r in target_ratings]
+
+        current_rating_by_key = {f"{r['entityType']}:{r['entityId']}": r for r in current_ratings_norm if r.get("entityId")}
+        target_rating_by_key = {f"{r['entityType']}:{r['entityId']}": r for r in target_ratings_norm if r.get("entityId")}
+        shared_rating_keys = set(current_rating_by_key.keys()) & set(target_rating_by_key.keys())
+
+        rating_similarity = 0
+        closest_ratings = []
+        if shared_rating_keys:
+            diffs = []
+            for key in shared_rating_keys:
+                cr = current_rating_by_key[key]
+                tr = target_rating_by_key[key]
+                diff = abs(cr["rating"] - tr["rating"])
+                diffs.append(diff)
+                closest_ratings.append({
+                    "entityType": cr["entityType"],
+                    "entityId": cr["entityId"],
+                    "name": cr.get("name") or tr.get("name"),
+                    "image": cr.get("image") or tr.get("image"),
+                    "artist": cr.get("artist") or tr.get("artist"),
+                    "yourRating": cr["rating"],
+                    "theirRating": tr["rating"],
+                    "diff": diff,
+                })
+            avg_diff = sum(diffs) / len(diffs)
+            # max possible diff is 9 (1 vs 10), normalize to 0-1 where 0 diff = 1.0
+            rating_similarity = max(0, 1 - (avg_diff / 9))
+            closest_ratings = sorted(closest_ratings, key=lambda x: x["diff"])[:5]
+
+        # Weighted score: 55% favorites, 25% artists, 20% ratings
+        score = round((item_score * 0.55 + artist_score * 0.25 + rating_similarity * 0.20) * 100)
         if str(current_user["_id"]) == str(target_user["_id"]):
             score = 100
+
+        def get_taste_label(s):
+            if s >= 80:
+                return "Soulmate"
+            if s >= 60:
+                return "Strong match"
+            if s >= 40:
+                return "Some overlap"
+            if s >= 20:
+                return "Different lanes"
+            return "Polar opposites"
 
         shared_items = [target_by_key[key] for key in list(shared_keys)[:8]]
         top_shared_artists = sorted(
@@ -1055,6 +1166,9 @@ def profile_compatibility():
             "totalCompared": union_count,
             "sharedItems": shared_items,
             "topSharedArtists": top_shared_artists,
+            "tasteLabel": get_taste_label(score),
+            "sharedRatingsCount": len(shared_rating_keys),
+            "closestRatings": closest_ratings[:5],
         }), 200
     except Exception as e:
         logger.exception("Error al calcular compatibilidad")
@@ -1366,6 +1480,42 @@ def monthly_wrapped():
             reverse=True,
         )[:5]
 
+        # Compare with previous month
+        prev_date = datetime(target_year, target_month, 1) - timedelta(days=1)
+        prev_year = prev_date.year
+        prev_month = prev_date.month
+
+        def is_prev_month(value):
+            ts = parse_timestamp(value)
+            if not ts:
+                return False
+            return ts.year == prev_year and ts.month == prev_month
+
+        prev_monthly_ratings = [normalize_rating(row) for row in rating_rows if is_prev_month(row.get("created_at") or row.get("timestamp"))]
+        prev_monthly_favorites = [fav for fav in all_favorites if is_prev_month(fav.get("timestamp"))]
+        prev_rating_values = [float(item["rating"] or 0) for item in prev_monthly_ratings]
+        prev_type_counts = Counter(item["entityType"] for item in prev_monthly_ratings if item.get("entityType"))
+
+        def delta(current, previous):
+            return current - previous
+
+        comparison = {
+            "previousMonth": f"{prev_year:04d}-{prev_month:02d}",
+            "hasPrevious": len(prev_monthly_ratings) > 0 or len(prev_monthly_favorites) > 0,
+            "ratingsDelta": delta(len(monthly_ratings), len(prev_monthly_ratings)),
+            "averageRatingDelta": round(
+                (sum(rating_values) / len(rating_values) if rating_values else 0)
+                - (sum(prev_rating_values) / len(prev_rating_values) if prev_rating_values else 0),
+                2,
+            ),
+            "newFavoritesDelta": delta(len(monthly_favorites), len(prev_monthly_favorites)),
+            "dominantTypeChanged": (
+                type_counts.most_common(1)[0][0] if type_counts else None
+            ) != (
+                prev_type_counts.most_common(1)[0][0] if prev_type_counts else None
+            ),
+        }
+
         wrapped = {
             "month": f"{target_year:04d}-{target_month:02d}",
             "summary": {
@@ -1375,6 +1525,7 @@ def monthly_wrapped():
                 "newFavoritesCount": len(monthly_favorites),
                 "topEntityType": type_counts.most_common(1)[0][0] if type_counts else None,
             },
+            "comparison": comparison,
             "ratingsByType": dict(type_counts),
             "favoritesByType": dict(favorite_type_counts),
             "topArtists": [{"name": name, "count": count} for name, count in artist_counter.most_common(5)],
@@ -1387,6 +1538,86 @@ def monthly_wrapped():
     except Exception as e:
         logger.exception("Error al obtener monthly wrapped")
         return internal_error("Error al obtener tu resumen mensual.")
+
+
+@app.route('/badges', methods=['GET'])
+@jwt_required()
+@rate_limit(30)
+def user_badges():
+    user_email = get_jwt_identity()
+    current_user = users_repository.find_by_email(user_email)
+    if not current_user:
+        return jsonify({"message": "Usuario no encontrado."}), 404
+
+    user_id = str(current_user["_id"])
+    cache_key = f"badges:{user_id}"
+    cached = app.extensions["cache"].get(cache_key)
+    if cached is not None:
+        return jsonify({"badges": cached}), 200
+
+    try:
+        if app.config["DATABASE_PROVIDER"] == "mongo":
+            rating_rows = list(ratings_repository.collection.find({"userId": user_id}))
+            favorite_rows = favorites_repository.list_for_user(current_user)
+        else:
+            rating_rows = repositories.ratings.client.select("ratings", user_id=user_id, limit=1000)
+            favorite_rows = repositories.favorites.client.select("favorites", user_id=user_id, limit=1000)
+
+        def normalize_rating(row):
+            return {
+                "rating": float(row.get("rating") or 0),
+                "entityType": row.get("entity_type") or row.get("entityType"),
+                "artist": row.get("artist"),
+                "timestamp": parse_timestamp(row.get("created_at") or row.get("timestamp")),
+            }
+
+        ratings = [normalize_rating(r) for r in rating_rows]
+        favorites = favorite_rows
+        following = current_user.get("following", []) or []
+
+        album_ratings = [r for r in ratings if r.get("entityType") == "album"]
+        song_ratings = [r for r in ratings if r.get("entityType") == "song"]
+        rating_values = [r["rating"] for r in ratings if r["rating"]]
+        avg_rating = sum(rating_values) / len(rating_values) if rating_values else 0
+
+        unique_artists = set()
+        for r in ratings:
+            if r.get("artist"):
+                for a in [part.strip() for part in r["artist"].split(",") if part.strip()]:
+                    unique_artists.add(a)
+
+        night_ratings = [r for r in ratings if r.get("timestamp") and 0 <= r["timestamp"].hour < 5]
+
+        months_with_activity = set()
+        for r in ratings:
+            if r.get("timestamp"):
+                months_with_activity.add((r["timestamp"].year, r["timestamp"].month))
+
+        user_created = parse_timestamp(current_user.get("created_at"))
+        account_age_days = (datetime.now(timezone.utc) - user_created).days if user_created else 0
+
+        badges = []
+
+        def add_badge(bid, name, description, icon, rarity, condition):
+            if condition:
+                badges.append({"id": bid, "name": name, "description": description, "icon": icon, "unlocked": True, "rarity": rarity})
+
+        add_badge("album_hunter", "Album Hunter", "Rated 10+ albums", "headphones", "common", len(album_ratings) >= 10)
+        add_badge("song_critic", "Song Critic", "Rated 20+ songs", "music", "common", len(song_ratings) >= 20)
+        add_badge("explorer", "Explorer", "Discovered 20+ unique artists", "globe", "common", len(unique_artists) >= 20)
+        add_badge("collector", "Collector", "Saved 20+ favorites", "heart", "common", len(favorites) >= 20)
+        add_badge("night_owl", "Night Owl", "Rated music after midnight", "moon-o", "uncommon", len(night_ratings) >= 5)
+        add_badge("harsh_critic", "Harsh Critic", "Average rating below 4.0", "frown-o", "rare", avg_rating > 0 and avg_rating < 4.0 and len(rating_values) >= 10)
+        add_badge("generous_rater", "Generous Rater", "Average rating above 8.5", "smile-o", "rare", avg_rating > 8.5 and len(rating_values) >= 10)
+        add_badge("social_butterfly", "Social Butterfly", "Following 10+ users", "users", "common", len(following) >= 10)
+        add_badge("consistent", "Consistent", "Active in 3+ different months", "calendar", "uncommon", len(months_with_activity) >= 3)
+        add_badge("veteran", "Veteran", "6+ months on SongBox", "star", "epic", account_age_days >= 180)
+
+        app.extensions["cache"].set(cache_key, badges, ttl=300)
+        return jsonify({"badges": badges}), 200
+    except Exception as e:
+        logger.exception("Error al obtener badges")
+        return internal_error("Error al obtener tus badges.")
 
 
 @app.route('/activity', methods=['GET'])

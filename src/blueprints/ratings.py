@@ -23,6 +23,22 @@ def _invalidate_rating_cache(entity_type, entity_id):
         cache.delete_prefix("activity:")
 
 
+def _record_rating_signal(repos, user_id, entity_type, entity_id, rating, name=None, image=None, artist=None, action="rate"):
+    try:
+        repos.music_signals.create(
+            user_id,
+            "songbox",
+            "rating",
+            entity_type,
+            entity_id=entity_id,
+            spotify_id=entity_id,
+            strength=max(0, min(1, (rating or 0) / 10)),
+            metadata={"rating": rating, "name": name, "image": image, "artist": artist, "action": action},
+        )
+    except Exception:
+        logger.exception("Failed to record rating music signal")
+
+
 def _validate_rating_payload(data):
     entity_type = get_string_field(data, "entityType", max_length=20)
     entity_id = get_string_field(data, "entityId", max_length=120)
@@ -65,6 +81,7 @@ def rate_entity():
             return jsonify({"message": "Ya has calificado esta entidad."}), 400
 
         repos.ratings.create(entity_type, entity_id, user_id, rating, name=name, image=image, artist=artist)
+        _record_rating_signal(repos, user_id, entity_type, entity_id, rating, name=name, image=image, artist=artist, action="create")
         summary = repos.ratings.summarize_entity(entity_type, entity_id)
         _invalidate_rating_cache(entity_type, entity_id)
         logger.info(f"Entidad {entity_id} averageRating={summary['averageRating']}, ratingCount={summary['ratingCount']}")
@@ -72,6 +89,7 @@ def rate_entity():
             "message": "Calificación añadida correctamente.",
             "averageRating": summary["averageRating"],
             "ratingCount": summary["ratingCount"],
+            "ratingDistribution": summary["ratingDistribution"],
         }), 201
 
     except ValidationError:
@@ -101,12 +119,14 @@ def update_rate_entity():
             return jsonify({"message": "Aún no has calificado esta entidad."}), 404
 
         repos.ratings.update_rating(entity_type, entity_id, user_id, rating, name=name, image=image, artist=artist)
+        _record_rating_signal(repos, user_id, entity_type, entity_id, rating, name=name, image=image, artist=artist, action="update")
         summary = repos.ratings.summarize_entity(entity_type, entity_id)
         _invalidate_rating_cache(entity_type, entity_id)
         return jsonify({
             "message": "Calificación actualizada correctamente.",
             "averageRating": summary["averageRating"],
             "ratingCount": summary["ratingCount"],
+            "ratingDistribution": summary["ratingDistribution"],
         }), 200
 
     except ValidationError:
@@ -140,12 +160,14 @@ def delete_rate_entity():
             return jsonify({"message": "Aún no has calificado esta entidad."}), 404
 
         repos.ratings.delete_rating(entity_type, entity_id, user_id)
+        _record_rating_signal(repos, user_id, entity_type, entity_id, 0, action="delete")
         summary = repos.ratings.summarize_entity(entity_type, entity_id)
         _invalidate_rating_cache(entity_type, entity_id)
         return jsonify({
             "message": "Calificación eliminada correctamente.",
             "averageRating": summary["averageRating"],
             "ratingCount": summary["ratingCount"],
+            "ratingDistribution": summary["ratingDistribution"],
         }), 200
 
     except ValidationError:

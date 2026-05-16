@@ -61,15 +61,23 @@ class RatingsRepository:
                 '_id': None,
                 'averageRating': {'$avg': '$rating'},
                 'ratingCount': {'$sum': 1},
+                'ratings': {'$push': '$rating'},
             }},
         ]
         result = list(self.collection.aggregate(pipeline))
         if not result:
-            return {'averageRating': 0, 'ratingCount': 0}
+            return {'averageRating': 0, 'ratingCount': 0, 'ratingDistribution': {str(value): 0 for value in range(1, 11)}}
+
+        distribution = {str(value): 0 for value in range(1, 11)}
+        for rating in result[0].get('ratings', []):
+            key = str(int(rating))
+            if key in distribution:
+                distribution[key] += 1
 
         return {
             'averageRating': result[0]['averageRating'],
             'ratingCount': result[0]['ratingCount'],
+            'ratingDistribution': distribution,
         }
 
     def top_rated(self, entity_type, limit=20):
