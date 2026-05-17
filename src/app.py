@@ -7,9 +7,8 @@ from marshmallow import Schema, fields, ValidationError
 from dotenv import load_dotenv
 from urllib.parse import urlencode
 from collections import Counter
-import base64
-import json
 import uuid
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
 load_dotenv()
 
@@ -44,18 +43,37 @@ def get_spotify_redirect_uri():
 
 
 def encode_spotify_state(email, return_url=None):
-    payload = {"email": email, "return_url": return_url}
-    encoded = base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("utf-8")
-    return encoded.rstrip("=")
+    if not email or len(email) > 120:
+        raise ValueError("Invalid Spotify state email.")
+
+    payload = {"email": email.lower()}
+    if is_allowed_frontend_return_url(return_url):
+        payload["return_url"] = return_url
+
+    serializer = URLSafeTimedSerializer(app.config["SECRET_KEY"] or app.config["JWT_SECRET_KEY"])
+    return serializer.dumps(payload, salt="spotify-oauth-state")
 
 
 def decode_spotify_state(state):
     try:
-        padded_state = state + "=" * (-len(state) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(padded_state.encode("utf-8")))
-        return payload.get("email"), payload.get("return_url")
-    except (ValueError, TypeError, json.JSONDecodeError):
-        return state, None
+        serializer = URLSafeTimedSerializer(app.config["SECRET_KEY"] or app.config["JWT_SECRET_KEY"])
+        payload = serializer.loads(
+            state,
+            salt="spotify-oauth-state",
+            max_age=app.config["SPOTIFY_STATE_MAX_AGE_SECONDS"],
+        )
+    except SignatureExpired as error:
+        raise ValueError("Spotify state expired.") from error
+    except (BadSignature, TypeError) as error:
+        raise ValueError("Invalid Spotify state.") from error
+
+    email = payload.get("email") if isinstance(payload, dict) else None
+    return_url = payload.get("return_url") if isinstance(payload, dict) else None
+    if not email or len(email) > 120:
+        raise ValueError("Invalid Spotify state.")
+    if return_url and not is_allowed_frontend_return_url(return_url):
+        raise ValueError("Invalid Spotify return URL.")
+    return email.lower(), return_url
 
 
 def is_allowed_frontend_return_url(return_url):
@@ -65,14 +83,24 @@ def is_allowed_frontend_return_url(return_url):
     return return_url.startswith(("frontsb://", "exp://", "exps://"))
 
 
-def build_frontend_redirect_url(return_url, token):
+def build_frontend_redirect_url(return_url, params):
     base_url = return_url if is_allowed_frontend_return_url(return_url) else app.config["FRONTEND_DEEP_LINK"]
     separator = "&" if "?" in base_url else "?"
-    return f"{base_url}{separator}{urlencode({'token': token})}"
+    return f"{base_url}{separator}{urlencode(params)}"
 
 
 def create_session_token(email):
     return create_access_token(identity=email, expires_delta=timedelta(days=30))
+
+
+def create_spotify_exchange_code(email):
+    code = str(uuid.uuid4())
+    app.extensions["spotify_auth_codes"].set(
+        code,
+        {"email": email},
+        ttl=app.config["SPOTIFY_EXCHANGE_CODE_MINUTES"] * 60,
+    )
+    return code
 
 
 def parse_timestamp(value):
@@ -115,12 +143,15 @@ ratings_repository = repositories.ratings
 app.extensions = getattr(app, "extensions", {})
 app.extensions["repositories"] = repositories
 app.extensions["cache"] = TimedCache(default_ttl=300)
+app.extensions["spotify_auth_codes"] = TimedCache(default_ttl=600)
 
 jwt = JWTManager(app)
 if app.config["CORS_ORIGINS"]:
     CORS(app, origins=app.config["CORS_ORIGINS"])
-else:
+elif not app.config["IS_PRODUCTION"]:
     CORS(app)
+else:
+    logger.warning("CORS_ORIGINS is unset in production; CORS headers are disabled.")
 
 
 @app.before_request
@@ -290,6 +321,8 @@ def auth_spotify():
         sp_oauth = create_spotify_oauth(user_email, get_spotify_redirect_uri())
         auth_url = sp_oauth.get_authorize_url(state=encode_spotify_state(user_email, return_url))
         return redirect(auth_url)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 503
 
@@ -304,7 +337,10 @@ def spotify_callback():
 
     try:
         user_email, return_url = decode_spotify_state(state)
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 400
 
+    try:
         # Obtener el token de acceso de Spotify
         sp_oauth = create_spotify_oauth(user_email, get_spotify_redirect_uri())
         token_info = sp_oauth.get_access_token(code, as_dict=True)
@@ -319,15 +355,39 @@ def spotify_callback():
             }}
         )
 
-        # Crear un nuevo JWT que indica que la autenticación está completa
-        new_jwt = create_session_token(user_email)
+        exchange_code = create_spotify_exchange_code(user_email)
 
         # Redirigir al frontend utilizando un deep link
-        redirect_url = build_frontend_redirect_url(return_url, new_jwt)
+        redirect_url = build_frontend_redirect_url(return_url, {"spotify_code": exchange_code})
         return redirect(redirect_url)
 
     except Exception as e:
         return jsonify({"error": f"Error en el callback de Spotify: {str(e)}"}), 400
+
+
+@app.route('/auth/spotify/exchange', methods=['POST'])
+@rate_limit(20)
+def exchange_spotify_auth_code():
+    try:
+        data = get_json_body()
+        code = get_string_field(data, 'code', max_length=120)
+        payload = app.extensions["spotify_auth_codes"].get(code)
+        if not payload:
+            return jsonify({"message": "Código de autenticación inválido o expirado."}), 400
+
+        app.extensions["spotify_auth_codes"].delete(code)
+        email = payload["email"]
+        user = users_repository.find_by_email(email)
+        if not user:
+            return jsonify({"message": "Usuario no encontrado."}), 404
+
+        token = create_session_token(email)
+        return jsonify({"jwt": token, "user": serialize_current_user(user)}), 200
+    except ValidationError:
+        raise
+    except Exception:
+        logger.exception("Error exchanging Spotify auth code")
+        return internal_error("Error al completar autenticación de Spotify.")
 
 
 CONTENT_TYPE_MAP = {
