@@ -1,11 +1,3 @@
-from .comments_repository import CommentsRepository
-from .favorites_repository import FavoritesRepository
-from .music_signals_repository import MusicSignalsRepository
-from .music_entities_repository import MusicEntitiesRepository
-from .ratings_repository import RatingsRepository
-from .reviews_repository import ReviewsRepository
-from .spotify_profiles_repository import SpotifyProfilesRepository
-from .spotify_sync_snapshots_repository import SpotifySyncSnapshotsRepository
 from .supabase.comments_repository import SupabaseCommentsRepository
 from .supabase.favorites_repository import SupabaseFavoritesRepository
 from .supabase.music_signals_repository import SupabaseMusicSignalsRepository
@@ -16,7 +8,6 @@ from .supabase.spotify_profiles_repository import SupabaseSpotifyProfilesReposit
 from .supabase.spotify_sync_snapshots_repository import SupabaseSpotifySyncSnapshotsRepository
 from .supabase.users_repository import SupabaseUsersRepository
 from .supabase_client import create_supabase_client
-from .users_repository import UsersRepository
 
 
 class Repositories:
@@ -32,36 +23,18 @@ class Repositories:
         self.spotify_sync_snapshots = spotify_sync_snapshots
 
 
-def create_repositories(app, mongo):
-    provider = app.config["DATABASE_PROVIDER"]
-
-    if provider == "mongo":
-        return Repositories(
-            users=UsersRepository(mongo),
-            comments=CommentsRepository(mongo),
-            favorites=FavoritesRepository(mongo),
-            ratings=RatingsRepository(mongo),
-            reviews=ReviewsRepository(mongo),
-            music_signals=MusicSignalsRepository(mongo),
-            spotify_profiles=SpotifyProfilesRepository(mongo),
-            music_entities=MusicEntitiesRepository(mongo),
-            spotify_sync_snapshots=SpotifySyncSnapshotsRepository(mongo),
-        )
-
-    if provider == "supabase":
-        client = create_supabase_client(app)
-        app.extensions = getattr(app, "extensions", {})
-        app.extensions["supabase"] = client
-        return Repositories(
-            users=SupabaseUsersRepository(client),
-            comments=SupabaseCommentsRepository(client),
-            favorites=SupabaseFavoritesRepository(client),
-            ratings=SupabaseRatingsRepository(client),
-            reviews=SupabaseReviewsRepository(client),
-            music_signals=SupabaseMusicSignalsRepository(client),
-            spotify_profiles=SupabaseSpotifyProfilesRepository(client),
-            music_entities=SupabaseMusicEntitiesRepository(client),
-            spotify_sync_snapshots=SupabaseSpotifySyncSnapshotsRepository(client),
-        )
-
-    raise RuntimeError(f"Unsupported DATABASE_PROVIDER: {provider}")
+def create_repositories(app):
+    client = create_supabase_client(app)
+    app.extensions = getattr(app, "extensions", {})
+    app.extensions["supabase"] = client
+    return Repositories(
+        users=SupabaseUsersRepository(client),
+        comments=SupabaseCommentsRepository(client),
+        favorites=SupabaseFavoritesRepository(client),
+        ratings=SupabaseRatingsRepository(client),
+        reviews=SupabaseReviewsRepository(client),
+        music_signals=SupabaseMusicSignalsRepository(client),
+        spotify_profiles=SupabaseSpotifyProfilesRepository(client),
+        music_entities=SupabaseMusicEntitiesRepository(client),
+        spotify_sync_snapshots=SupabaseSpotifySyncSnapshotsRepository(client),
+    )

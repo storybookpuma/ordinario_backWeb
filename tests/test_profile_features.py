@@ -1,33 +1,32 @@
 import importlib
 import os
+from types import SimpleNamespace
 import unittest
 
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-jwt-secret")
 os.environ.setdefault("SECRET_KEY", "test-secret")
-os.environ.setdefault("MONGO_URI", "mongodb://localhost:27017/test")
+os.environ.setdefault("SUPABASE_URL", "https://example.supabase.co")
+os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test-service-role-key")
 os.environ.setdefault("CREATE_DB_INDEXES", "false")
 
 
-class FakeCursor(list):
-    def sort(self, *_args, **_kwargs):
-        return self
-
-    def limit(self, value):
-        return FakeCursor(self[:value])
-
-
-class FakeCollection:
+class FakeSupabaseClient:
     def __init__(self, rows):
         self.rows = rows
 
-    def find(self, _query):
-        return FakeCursor(self.rows)
+    def select(self, table, **filters):
+        rows = self.rows.get(table, [])
+        user_id = filters.get("user_id")
+        if user_id:
+            rows = [row for row in rows if row.get("user_id") == user_id]
+        limit = filters.get("limit")
+        return rows[:limit] if limit else rows
 
 
 class FakeRatingsRepository:
     def __init__(self, rows):
-        self.collection = FakeCollection(rows)
+        self.client = FakeSupabaseClient({"ratings": rows})
 
 
 class FakeFavoritesRepository:
@@ -88,48 +87,33 @@ class ProfileFeatureTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app_module = importlib.import_module("src.app")
         cls.app_module.app.config["TESTING"] = True
-        cls.app_module.app.config["DATABASE_PROVIDER"] = "mongo"
 
     def setUp(self):
         self.app_module.users_repository = FakeUsersRepository()
         self.app_module.favorites_repository = FakeFavoritesRepository()
-        self.app_module.ratings_repository = FakeRatingsRepository([
-            {"entityType": "song", "entityId": "s1", "userId": "me", "rating": 9, "name": "Good Days", "artist": "SZA", "timestamp": "2026-05-10T12:00:00+00:00"},
-            {"entityType": "album", "entityId": "al1", "userId": "me", "rating": 8, "name": "CTRL", "artist": "SZA", "timestamp": "2026-05-11T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s2", "userId": "me", "rating": 9, "name": "Kill Bill", "artist": "SZA", "timestamp": "2026-04-12T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s3", "userId": "me", "rating": 9, "name": "Saturn", "artist": "SZA", "timestamp": "2026-03-13T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s4", "userId": "me", "rating": 9, "name": "Snooze", "artist": "SZA", "timestamp": "2026-05-14T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s5", "userId": "me", "rating": 9, "name": "Broken Clocks", "artist": "SZA", "timestamp": "2026-05-15T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s6", "userId": "me", "rating": 9, "name": "Drew Barrymore", "artist": "SZA", "timestamp": "2026-05-16T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s7", "userId": "me", "rating": 9, "name": "The Weekend", "artist": "SZA", "timestamp": "2026-05-17T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s8", "userId": "me", "rating": 9, "name": "Supermodel", "artist": "SZA", "timestamp": "2026-05-18T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s9", "userId": "me", "rating": 9, "name": "Garden", "artist": "SZA", "timestamp": "2026-05-19T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s10", "userId": "me", "rating": 9, "name": "20 Something", "artist": "SZA", "timestamp": "2026-05-20T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s11", "userId": "me", "rating": 9, "name": "Normal Girl", "artist": "SZA", "timestamp": "2026-05-21T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s12", "userId": "me", "rating": 9, "name": "Anything", "artist": "SZA", "timestamp": "2026-05-22T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s13", "userId": "me", "rating": 9, "name": "Love Galore", "artist": "SZA", "timestamp": "2026-05-23T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s14", "userId": "me", "rating": 9, "name": "Doves", "artist": "SZA", "timestamp": "2026-05-24T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s15", "userId": "me", "rating": 9, "name": "Smoking", "artist": "SZA", "timestamp": "2026-05-25T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s16", "userId": "me", "rating": 9, "name": "Forgiveless", "artist": "SZA", "timestamp": "2026-05-26T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s17", "userId": "me", "rating": 9, "name": "Notice Me", "artist": "SZA", "timestamp": "2026-05-27T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s18", "userId": "me", "rating": 9, "name": "Gone Girl", "artist": "SZA", "timestamp": "2026-05-28T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s19", "userId": "me", "rating": 9, "name": "Blind", "artist": "SZA", "timestamp": "2026-05-29T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s20", "userId": "me", "rating": 9, "name": "Used", "artist": "SZA", "timestamp": "2026-05-30T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s21", "userId": "me", "rating": 9, "name": "Seek", "artist": "Frank Ocean", "timestamp": "2026-05-31T12:00:00+00:00"},
-            {"entityType": "song", "entityId": "s22", "userId": "me", "rating": 9, "name": "Pink", "artist": "Tyler, The Creator", "timestamp": "2026-05-31T12:00:00+00:00"},
-            {"entityType": "album", "entityId": "al2", "userId": "me", "rating": 8, "name": "SOS", "artist": "SZA", "timestamp": "2026-05-21T12:00:00+00:00"},
-            {"entityType": "album", "entityId": "al3", "userId": "me", "rating": 8, "name": "Lana", "artist": "SZA", "timestamp": "2026-05-22T12:00:00+00:00"},
-            {"entityType": "album", "entityId": "al4", "userId": "me", "rating": 8, "name": "Z", "artist": "SZA", "timestamp": "2026-05-23T12:00:00+00:00"},
-            {"entityType": "album", "entityId": "al5", "userId": "me", "rating": 8, "name": "E", "artist": "SZA", "timestamp": "2026-05-24T12:00:00+00:00"},
-            {"entityType": "album", "entityId": "al6", "userId": "me", "rating": 8, "name": "S", "artist": "SZA", "timestamp": "2026-05-25T12:00:00+00:00"},
-            {"entityType": "album", "entityId": "al7", "userId": "me", "rating": 8, "name": "A", "artist": "SZA", "timestamp": "2026-05-26T12:00:00+00:00"},
-            {"entityType": "album", "entityId": "al8", "userId": "me", "rating": 8, "name": "B", "artist": "SZA", "timestamp": "2026-05-27T12:00:00+00:00"},
-            {"entityType": "album", "entityId": "al9", "userId": "me", "rating": 8, "name": "C", "artist": "SZA", "timestamp": "2026-05-28T12:00:00+00:00"},
-            {"entityType": "album", "entityId": "al10", "userId": "me", "rating": 8, "name": "D", "artist": "SZA", "timestamp": "2026-05-29T12:00:00+00:00"},
-            {"entityType": "album", "entityId": "al11", "userId": "me", "rating": 8, "name": "F", "artist": "SZA", "timestamp": "2026-05-30T12:00:00+00:00"},
-            {"entityType": "album", "entityId": "al12", "userId": "me", "rating": 8, "name": "Blonde", "artist": "Frank Ocean", "timestamp": "2026-05-31T12:00:00+00:00"},
-            {"entityType": "album", "entityId": "al13", "userId": "me", "rating": 8, "name": "Igor", "artist": "Tyler, The Creator", "timestamp": "2026-05-31T12:00:00+00:00"},
-        ])
+        rating_rows = [
+            {"entity_type": "song", "entity_id": "s1", "user_id": "me", "rating": 9, "name": "Good Days", "artist": "SZA", "created_at": "2026-05-10T12:00:00+00:00"},
+            {"entity_type": "album", "entity_id": "al1", "user_id": "me", "rating": 8, "name": "CTRL", "artist": "SZA", "created_at": "2026-05-11T12:00:00+00:00"},
+            {"entity_type": "song", "entity_id": "s2", "user_id": "me", "rating": 9, "name": "Kill Bill", "artist": "SZA", "created_at": "2026-04-12T12:00:00+00:00"},
+            {"entity_type": "song", "entity_id": "s3", "user_id": "me", "rating": 9, "name": "Saturn", "artist": "SZA", "created_at": "2026-03-13T12:00:00+00:00"},
+            *[
+                {"entity_type": "song", "entity_id": f"s{index}", "user_id": "me", "rating": 9, "name": f"Song {index}", "artist": "SZA", "created_at": f"2026-05-{index:02d}T12:00:00+00:00"}
+                for index in range(4, 22)
+            ],
+            *[
+                {"entity_type": "album", "entity_id": f"al{index}", "user_id": "me", "rating": 8, "name": f"Album {index}", "artist": "SZA", "created_at": f"2026-05-{index + 10:02d}T12:00:00+00:00"}
+                for index in range(2, 12)
+            ],
+            {"entity_type": "album", "entity_id": "al12", "user_id": "me", "rating": 8, "name": "Blonde", "artist": "Frank Ocean", "created_at": "2026-05-31T12:00:00+00:00"},
+            {"entity_type": "album", "entity_id": "al13", "user_id": "me", "rating": 8, "name": "Igor", "artist": "Tyler, The Creator", "created_at": "2026-05-31T12:00:00+00:00"},
+        ]
+        fake_client = FakeSupabaseClient({"ratings": rating_rows, "favorites": []})
+        self.app_module.ratings_repository = FakeRatingsRepository(rating_rows)
+        self.app_module.repositories = SimpleNamespace(
+            ratings=SimpleNamespace(client=fake_client),
+            favorites=SimpleNamespace(client=fake_client),
+            comments=SimpleNamespace(client=fake_client),
+        )
         self.client = self.app_module.app.test_client()
         with self.app_module.app.app_context():
             self.token = self.app_module.create_access_token(identity="me@example.com")

@@ -1,5 +1,4 @@
 from flask import Flask, request, jsonify, redirect, g
-from flask_pymongo import PyMongo
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timezone, timedelta
 from flask_jwt_extended import JWTManager, create_access_token, get_jwt_identity, jwt_required
@@ -27,7 +26,6 @@ import logging
 
 app = Flask(__name__)
 
-# Configuración de Flask y MongoDB
 app.config.from_object(Config)
 app.secret_key = app.config["SECRET_KEY"]
 
@@ -119,8 +117,6 @@ def parse_timestamp(value):
 def get_user_favorites(user):
     if not user:
         return []
-    if app.config["DATABASE_PROVIDER"] == "mongo":
-        return user.get("favorites", [])
     return favorites_repository.list_for_user(user)
 
 
@@ -132,8 +128,7 @@ def favorite_key(item):
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 
 # Inicializar JWT y repositorios
-mongo = PyMongo(app) if app.config["DATABASE_PROVIDER"] == "mongo" else None
-repositories = create_repositories(app, mongo)
+repositories = create_repositories(app)
 users_repository = repositories.users
 comments_repository = repositories.comments
 favorites_repository = repositories.favorites
@@ -227,11 +222,10 @@ def healthz():
 @app.route('/readyz', methods=['GET'])
 def readyz():
     try:
-        if app.config["DATABASE_PROVIDER"] == "mongo" and mongo is not None:
-            mongo.cx.admin.command('ping')
+        users_repository.client.select("app_users", limit=1, columns="id")
         return jsonify({
             "status": "ready",
-            "database_provider": app.config["DATABASE_PROVIDER"],
+            "database_provider": "supabase",
             "request_id": getattr(g, "request_id", None),
         }), 200
     except Exception:
@@ -1154,8 +1148,8 @@ def profile_compatibility():
         item_score = (len(shared_keys) / union_count) if union_count else 0
         artist_score = shared_artist_weight / artist_pool
         # Ratings similarity
-        current_ratings = ratings_repository.collection.find({"userId": str(current_user["_id"])}) if app.config["DATABASE_PROVIDER"] == "mongo" else repositories.ratings.client.select("ratings", user_id=str(current_user["_id"]), limit=1000)
-        target_ratings = ratings_repository.collection.find({"userId": str(target_user["_id"])}) if app.config["DATABASE_PROVIDER"] == "mongo" else repositories.ratings.client.select("ratings", user_id=str(target_user["_id"]), limit=1000)
+        current_ratings = repositories.ratings.client.select("ratings", user_id=str(current_user["_id"]), limit=1000)
+        target_ratings = repositories.ratings.client.select("ratings", user_id=str(target_user["_id"]), limit=1000)
 
         def normalize_rating(row):
             return {
@@ -1501,22 +1495,18 @@ def monthly_wrapped():
         }
 
     try:
-        if app.config["DATABASE_PROVIDER"] == "mongo":
-            rating_rows = list(ratings_repository.collection.find({"userId": user_id}).sort("timestamp", -1).limit(1000))
-            favorite_rows = favorites_repository.list_for_user(current_user)
-        else:
-            rating_rows = repositories.ratings.client.select(
-                "ratings",
-                user_id=user_id,
-                limit=1000,
-                order="created_at.desc",
-            )
-            favorite_rows = repositories.favorites.client.select(
-                "favorites",
-                user_id=user_id,
-                limit=1000,
-                order="created_at.desc",
-            )
+        rating_rows = repositories.ratings.client.select(
+            "ratings",
+            user_id=user_id,
+            limit=1000,
+            order="created_at.desc",
+        )
+        favorite_rows = repositories.favorites.client.select(
+            "favorites",
+            user_id=user_id,
+            limit=1000,
+            order="created_at.desc",
+        )
 
         monthly_ratings = [normalize_rating(row) for row in rating_rows if is_target_month(row.get("created_at") or row.get("timestamp"))]
         all_favorites = [normalize_favorite(row) for row in favorite_rows]
@@ -1616,12 +1606,8 @@ def user_badges():
         return jsonify({"badges": cached}), 200
 
     try:
-        if app.config["DATABASE_PROVIDER"] == "mongo":
-            rating_rows = list(ratings_repository.collection.find({"userId": user_id}))
-            favorite_rows = favorites_repository.list_for_user(current_user)
-        else:
-            rating_rows = repositories.ratings.client.select("ratings", user_id=user_id, limit=1000)
-            favorite_rows = repositories.favorites.client.select("favorites", user_id=user_id, limit=1000)
+        rating_rows = repositories.ratings.client.select("ratings", user_id=user_id, limit=1000)
+        favorite_rows = repositories.favorites.client.select("favorites", user_id=user_id, limit=1000)
 
         def normalize_rating(row):
             return {
@@ -1712,102 +1698,62 @@ def activity_feed():
     try:
         activities = []
 
-        if app.config["DATABASE_PROVIDER"] == "mongo":
-            if is_personalized:
-                comment_filter = {'user_id': {'$in': relevant_ids}}
-                rating_filter = {'userId': {'$in': relevant_ids}}
-            else:
-                comment_filter = {}
-                rating_filter = {}
+        comment_kwargs = {"limit": limit, "order": "created_at.desc"}
+        rating_kwargs = {"limit": limit, "order": "created_at.desc"}
+        favorite_kwargs = {"limit": limit, "order": "created_at.desc"}
 
-            recent_comments = comments_repository.collection.find(comment_filter).sort('timestamp', -1).limit(limit)
-            for c in recent_comments:
-                activities.append({
-                    "type": "comment",
-                    "entityType": c.get("entity_type"),
-                    "entityId": str(c.get("entity_id")),
-                    "username": c.get("username"),
-                    "userPhoto": c.get("user_photo"),
-                    "text": c.get("comment_text"),
-                    "name": c.get("name"),
-                    "image": c.get("image"),
-                    "artist": c.get("artist"),
-                    "timestamp": c.get("timestamp").isoformat() if c.get("timestamp") else None,
-                })
+        if is_personalized:
+            ids_csv = ",".join(relevant_ids)
+            comment_kwargs["user_id_in"] = ids_csv
+            rating_kwargs["user_id_in"] = ids_csv
+            favorite_kwargs["user_id_in"] = ids_csv
 
-            recent_ratings = ratings_repository.collection.find(rating_filter).sort('timestamp', -1).limit(limit)
-            for r in recent_ratings:
-                user = users_repository.find_by_id(r.get("userId"))
-                activities.append({
-                    "type": "rating",
-                    "entityType": r.get("entityType"),
-                    "entityId": r.get("entityId"),
-                    "username": user.get("username") if user else "Usuario",
-                    "userPhoto": user.get("profile_picture") if user else None,
-                    "rating": r.get("rating"),
-                    "name": r.get("name"),
-                    "image": r.get("image"),
-                    "artist": r.get("artist"),
-                    "timestamp": r.get("timestamp").isoformat() if r.get("timestamp") else None,
-                })
-        else:
-            # Supabase path: fetch recent items from each table
-            comment_kwargs = {"limit": limit, "order": "created_at.desc"}
-            rating_kwargs = {"limit": limit, "order": "created_at.desc"}
-            favorite_kwargs = {"limit": limit, "order": "created_at.desc"}
+        comment_rows = repositories.comments.client.select("comments", **comment_kwargs)
+        for row in comment_rows:
+            user = users_repository.find_by_id(row.get("user_id"))
+            activities.append({
+                "type": "comment",
+                "entityType": row.get("entity_type"),
+                "entityId": row.get("entity_id"),
+                "username": user.get("username") if user else "Usuario",
+                "userPhoto": user.get("profile_picture") if user else None,
+                "text": row.get("comment_text"),
+                "name": row.get("name"),
+                "image": row.get("image"),
+                "artist": row.get("artist"),
+                "timestamp": row.get("created_at"),
+            })
 
-            if is_personalized:
-                ids_csv = ",".join(relevant_ids)
-                comment_kwargs["user_id_in"] = ids_csv
-                rating_kwargs["user_id_in"] = ids_csv
-                favorite_kwargs["user_id_in"] = ids_csv
+        rating_rows = repositories.ratings.client.select("ratings", **rating_kwargs)
+        for row in rating_rows:
+            user = users_repository.find_by_id(row.get("user_id"))
+            activities.append({
+                "type": "rating",
+                "entityType": row.get("entity_type"),
+                "entityId": row.get("entity_id"),
+                "username": user.get("username") if user else "Usuario",
+                "userPhoto": user.get("profile_picture") if user else None,
+                "rating": row.get("rating"),
+                "name": row.get("name"),
+                "image": row.get("image"),
+                "artist": row.get("artist"),
+                "timestamp": row.get("created_at"),
+            })
 
-            comment_rows = repositories.comments.client.select("comments", **comment_kwargs)
-            for row in comment_rows:
-                user = users_repository.find_by_id(row.get("user_id"))
-                activities.append({
-                    "type": "comment",
-                    "entityType": row.get("entity_type"),
-                    "entityId": row.get("entity_id"),
-                    "username": user.get("username") if user else "Usuario",
-                    "userPhoto": user.get("profile_picture") if user else None,
-                    "text": row.get("comment_text"),
-                    "name": row.get("name"),
-                    "image": row.get("image"),
-                    "artist": row.get("artist"),
-                    "timestamp": row.get("created_at"),
-                })
-
-            rating_rows = repositories.ratings.client.select("ratings", **rating_kwargs)
-            for row in rating_rows:
-                user = users_repository.find_by_id(row.get("user_id"))
-                activities.append({
-                    "type": "rating",
-                    "entityType": row.get("entity_type"),
-                    "entityId": row.get("entity_id"),
-                    "username": user.get("username") if user else "Usuario",
-                    "userPhoto": user.get("profile_picture") if user else None,
-                    "rating": row.get("rating"),
-                    "name": row.get("name"),
-                    "image": row.get("image"),
-                    "artist": row.get("artist"),
-                    "timestamp": row.get("created_at"),
-                })
-
-            favorite_rows = repositories.favorites.client.select("favorites", **favorite_kwargs)
-            for row in favorite_rows:
-                user = users_repository.find_by_id(row.get("user_id"))
-                activities.append({
-                    "type": "favorite",
-                    "entityType": row.get("entity_type"),
-                    "entityId": row.get("entity_id"),
-                    "username": user.get("username") if user else "Usuario",
-                    "userPhoto": user.get("profile_picture") if user else None,
-                    "name": row.get("name"),
-                    "image": row.get("image"),
-                    "artist": row.get("artist"),
-                    "timestamp": row.get("created_at"),
-                })
+        favorite_rows = repositories.favorites.client.select("favorites", **favorite_kwargs)
+        for row in favorite_rows:
+            user = users_repository.find_by_id(row.get("user_id"))
+            activities.append({
+                "type": "favorite",
+                "entityType": row.get("entity_type"),
+                "entityId": row.get("entity_id"),
+                "username": user.get("username") if user else "Usuario",
+                "userPhoto": user.get("profile_picture") if user else None,
+                "name": row.get("name"),
+                "image": row.get("image"),
+                "artist": row.get("artist"),
+                "timestamp": row.get("created_at"),
+            })
 
         activities.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
         activities = activities[:limit]

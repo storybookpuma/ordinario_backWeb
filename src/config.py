@@ -16,8 +16,6 @@ def _csv_env(name, default=""):
 class Config:
     APP_ENV = os.getenv("APP_ENV") or os.getenv("FLASK_ENV") or os.getenv("ENV", "development")
     IS_PRODUCTION = APP_ENV.lower() == "production"
-    DATABASE_PROVIDER = os.getenv("DATABASE_PROVIDER", "mongo").lower()
-    MONGO_URI = _required_env("MONGO_URI") if DATABASE_PROVIDER == "mongo" else os.getenv("MONGO_URI")
     JWT_SECRET_KEY = _required_env("JWT_SECRET_KEY")
     SECRET_KEY = _required_env("SECRET_KEY")
     MAX_CONTENT_LENGTH = int(os.getenv("MAX_CONTENT_LENGTH", 5 * 1024 * 1024))
