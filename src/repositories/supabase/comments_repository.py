@@ -10,7 +10,7 @@ class SupabaseCommentsRepository:
         self.client = client
 
     def create(self, comment):
-        row = self.client.insert_one(self.comments_table, {
+        payload = {
             "entity_type": comment["entity_type"],
             "entity_id": str(comment["entity_id"]),
             "user_id": str(comment["user_id"]),
@@ -18,7 +18,10 @@ class SupabaseCommentsRepository:
             "name": comment.get("name"),
             "image": comment.get("image"),
             "artist": comment.get("artist"),
-        })
+        }
+        if comment.get("parent_id"):
+            payload["parent_id"] = comment["parent_id"]
+        row = self.client.insert_one(self.comments_table, payload)
         return self._to_app_comment(row)
 
     def find_by_id(self, comment_id):
@@ -43,6 +46,7 @@ class SupabaseCommentsRepository:
             limit=limit,
             offset=skip,
             order="created_at.desc",
+            parent_id="is.null",
         )
         comments = [self._to_app_comment(row) for row in rows]
         return sorted(
@@ -55,25 +59,37 @@ class SupabaseCommentsRepository:
             self.comments_table,
             entity_type=entity_type,
             entity_id=str(entity_id),
+            parent_id="is.null",
             columns="id",
         ))
 
+    def list_replies(self, parent_id):
+        rows = self.client.select(
+            self.comments_table,
+            parent_id=str(parent_id),
+            order="created_at.asc",
+        )
+        return [self._to_app_comment(row) for row in rows]
+
+    def reply_counts(self, comment_ids):
+        result = {}
+        for cid in comment_ids:
+            rows = self.client.select(
+                self.comments_table,
+                parent_id=str(cid),
+                columns="id",
+            )
+            result[str(cid)] = len(rows)
+        return result
+
     def update_reaction(self, comment_id, update_fields):
-        reaction_field = update_fields.get("$addToSet", {})
-        pull_field = update_fields.get("$pull", {})
+        add_fields = update_fields.get("$addToSet", {})
+        pull_fields = update_fields.get("$pull", {})
 
-        result = None
-
-        if "liked_by" in pull_field:
-            result = self._delete_reaction(comment_id, pull_field["liked_by"])
-        if "disliked_by" in pull_field:
-            result = self._delete_reaction(comment_id, pull_field["disliked_by"])
-        if "liked_by" in reaction_field:
-            return self._set_reaction(comment_id, reaction_field["liked_by"], "like")
-        if "disliked_by" in reaction_field:
-            return self._set_reaction(comment_id, reaction_field["disliked_by"], "dislike")
-        if result is not None:
-            return result
+        if add_fields.get("liked_by"):
+            return self._set_reaction(comment_id, add_fields["liked_by"], "like")
+        if pull_fields.get("liked_by"):
+            return self._delete_reaction(comment_id, pull_fields["liked_by"])
 
         raise NotImplementedError(f"Unsupported comment reaction update: {update_fields}")
 
@@ -99,7 +115,6 @@ class SupabaseCommentsRepository:
         user = self.client.select_one(self.users_table, id=comment["user_id"])
         reactions = self.client.select(self.reactions_table, comment_id=comment["id"])
         liked_by = [reaction["user_id"] for reaction in reactions if reaction["reaction"] == "like"]
-        disliked_by = [reaction["user_id"] for reaction in reactions if reaction["reaction"] == "dislike"]
 
         return {
             "_id": comment["id"],
@@ -115,13 +130,10 @@ class SupabaseCommentsRepository:
             "artist": comment.get("artist"),
             "timestamp": self._parse_timestamp(comment["created_at"]),
             "likes": len(liked_by),
-            "dislikes": len(disliked_by),
             "liked_by": liked_by,
-            "disliked_by": disliked_by,
         }
 
     def _parse_timestamp(self, value):
         if isinstance(value, datetime):
             return value
-
         return datetime.fromisoformat(value.replace("Z", "+00:00"))

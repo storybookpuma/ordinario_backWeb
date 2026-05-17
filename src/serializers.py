@@ -43,9 +43,11 @@ def serialize_comment(comment, entity_type):
             comment["timestamp"] = "Desconocido"
 
     comment["likes"] = int(comment.get("likes", 0))
-    comment["dislikes"] = int(comment.get("dislikes", 0))
     comment["liked_by"] = [str(uid) for uid in comment.get("liked_by", [])] if isinstance(comment.get("liked_by"), list) else []
-    comment["disliked_by"] = [str(uid) for uid in comment.get("disliked_by", [])] if isinstance(comment.get("disliked_by"), list) else []
+    if "dislikes" in comment:
+        del comment["dislikes"]
+    if "disliked_by" in comment:
+        del comment["disliked_by"]
     return comment
 
 

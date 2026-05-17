@@ -117,6 +117,8 @@ class SupabaseRestClient:
                 result[key.replace("_ilike", "")] = f"ilike.{value}"
             elif key.endswith("_in"):
                 result[key.replace("_in", "")] = f"in.({value})"
+            elif isinstance(value, str) and value.startswith("is."):
+                result[key] = value
             else:
                 result[key] = f"eq.{value}"
         return result

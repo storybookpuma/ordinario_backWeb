@@ -66,6 +66,10 @@ class SupabaseRatingsRepository:
             "ratingDistribution": distribution,
         }
 
+    def list_for_entity(self, entity_type, entity_id):
+        rows = self.client.select(self.table, entity_type=entity_type, entity_id=entity_id)
+        return [self._to_app_rating(row) for row in rows]
+
     def top_rated(self, entity_type, limit=20):
         rows = self.client.select(self.table, entity_type=entity_type, limit=1000)
         grouped = {}

@@ -80,6 +80,11 @@ class RatingsRepository:
             'ratingDistribution': distribution,
         }
 
+    def list_for_entity(self, entity_type, entity_id):
+        return list(self.collection.find(
+            {'entityType': entity_type, 'entityId': entity_id}
+        ))
+
     def top_rated(self, entity_type, limit=20):
         pipeline = [
             {'$match': {'entityType': entity_type}},
