@@ -49,20 +49,18 @@ class SupabaseRatingsRepository:
         )
 
     def summarize_entity(self, entity_type, entity_id):
-        rows = self.client.select(self.table, entity_type=entity_type, entity_id=entity_id)
         distribution = {str(value): 0 for value in range(1, 11)}
-        if not rows:
-            return {"averageRating": 0, "ratingCount": 0, "ratingDistribution": distribution}
+        summary = self.client.rpc("rating_summary", {
+            "p_entity_type": entity_type,
+            "p_entity_id": str(entity_id),
+        }) or {}
 
-        ratings = [row["rating"] for row in rows]
-        for rating in ratings:
-            key = str(int(rating))
-            if key in distribution:
-                distribution[key] += 1
+        rating_distribution = summary.get("ratingDistribution") or {}
+        distribution.update({str(key): int(value or 0) for key, value in rating_distribution.items()})
 
         return {
-            "averageRating": sum(ratings) / len(ratings),
-            "ratingCount": len(ratings),
+            "averageRating": summary.get("averageRating") or 0,
+            "ratingCount": summary.get("ratingCount") or 0,
             "ratingDistribution": distribution,
         }
 

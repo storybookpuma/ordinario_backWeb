@@ -1696,67 +1696,23 @@ def activity_feed():
         return jsonify({"activities": cached}), 200
 
     try:
-        activities = []
-
-        comment_kwargs = {"limit": limit, "order": "created_at.desc"}
-        rating_kwargs = {"limit": limit, "order": "created_at.desc"}
-        favorite_kwargs = {"limit": limit, "order": "created_at.desc"}
-
-        if is_personalized:
-            ids_csv = ",".join(relevant_ids)
-            comment_kwargs["user_id_in"] = ids_csv
-            rating_kwargs["user_id_in"] = ids_csv
-            favorite_kwargs["user_id_in"] = ids_csv
-
-        comment_rows = repositories.comments.client.select("comments", **comment_kwargs)
-        for row in comment_rows:
-            user = users_repository.find_by_id(row.get("user_id"))
-            activities.append({
-                "type": "comment",
-                "entityType": row.get("entity_type"),
-                "entityId": row.get("entity_id"),
-                "username": user.get("username") if user else "Usuario",
-                "userPhoto": user.get("profile_picture") if user else None,
-                "text": row.get("comment_text"),
-                "name": row.get("name"),
-                "image": row.get("image"),
-                "artist": row.get("artist"),
-                "timestamp": row.get("created_at"),
-            })
-
-        rating_rows = repositories.ratings.client.select("ratings", **rating_kwargs)
-        for row in rating_rows:
-            user = users_repository.find_by_id(row.get("user_id"))
-            activities.append({
-                "type": "rating",
-                "entityType": row.get("entity_type"),
-                "entityId": row.get("entity_id"),
-                "username": user.get("username") if user else "Usuario",
-                "userPhoto": user.get("profile_picture") if user else None,
-                "rating": row.get("rating"),
-                "name": row.get("name"),
-                "image": row.get("image"),
-                "artist": row.get("artist"),
-                "timestamp": row.get("created_at"),
-            })
-
-        favorite_rows = repositories.favorites.client.select("favorites", **favorite_kwargs)
-        for row in favorite_rows:
-            user = users_repository.find_by_id(row.get("user_id"))
-            activities.append({
-                "type": "favorite",
-                "entityType": row.get("entity_type"),
-                "entityId": row.get("entity_id"),
-                "username": user.get("username") if user else "Usuario",
-                "userPhoto": user.get("profile_picture") if user else None,
-                "name": row.get("name"),
-                "image": row.get("image"),
-                "artist": row.get("artist"),
-                "timestamp": row.get("created_at"),
-            })
-
-        activities.sort(key=lambda x: x.get("timestamp") or "", reverse=True)
-        activities = activities[:limit]
+        rows = repositories.ratings.client.rpc("activity_feed", {
+            "p_user_ids": relevant_ids if is_personalized else None,
+            "p_limit": limit,
+        })
+        activities = [{
+            "type": row.get("type"),
+            "entityType": row.get("entity_type"),
+            "entityId": row.get("entity_id"),
+            "username": row.get("username") or "Usuario",
+            "userPhoto": row.get("user_photo"),
+            "text": row.get("text"),
+            "rating": row.get("rating"),
+            "name": row.get("name"),
+            "image": row.get("image"),
+            "artist": row.get("artist"),
+            "timestamp": row.get("occurred_at"),
+        } for row in rows]
 
         app.extensions["cache"].set(cache_key, activities, ttl=300)
         return jsonify({"activities": activities}), 200

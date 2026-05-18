@@ -4,20 +4,20 @@ from src.repositories.supabase.ratings_repository import SupabaseRatingsReposito
 
 
 class FakeSupabaseClient:
-    def __init__(self, rows):
-        self.rows = rows
+    def __init__(self, summary):
+        self.summary = summary
 
-    def select(self, _table, **_filters):
-        return self.rows
+    def rpc(self, _function_name, _payload):
+        return self.summary
 
 
 class RatingDistributionTests(unittest.TestCase):
     def test_supabase_summary_returns_rating_distribution(self):
-        repository = SupabaseRatingsRepository(FakeSupabaseClient([
-            {"rating": 9},
-            {"rating": 9},
-            {"rating": 5},
-        ]))
+        repository = SupabaseRatingsRepository(FakeSupabaseClient({
+            "averageRating": 7.6666666667,
+            "ratingCount": 3,
+            "ratingDistribution": {"9": 2, "5": 1},
+        }))
 
         summary = repository.summarize_entity("album", "album-1")
 
@@ -27,7 +27,11 @@ class RatingDistributionTests(unittest.TestCase):
         self.assertEqual(summary["ratingDistribution"]["10"], 0)
 
     def test_empty_summary_returns_zero_distribution(self):
-        repository = SupabaseRatingsRepository(FakeSupabaseClient([]))
+        repository = SupabaseRatingsRepository(FakeSupabaseClient({
+            "averageRating": 0,
+            "ratingCount": 0,
+            "ratingDistribution": {str(value): 0 for value in range(1, 11)},
+        }))
 
         summary = repository.summarize_entity("artist", "artist-1")
 
